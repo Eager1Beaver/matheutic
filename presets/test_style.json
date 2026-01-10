@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "title": "Brain Workout - Test Style"
+  },
+  "seed": 12345,
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margin_mm": {
+      "top": 12,
+      "right": 12,
+      "bottom": 12,
+      "left": 12
+    }
+  },
+  "typography": {
+    "font_name": "Times-Roman",
+    "font_size": 14,
+    "line_gap": 4
+  },
+  "layout": {
+    "mode": "table_by_columns",
+    "rows_per_column": 47,
+    "show_column_headers": false,
+    "overflow_policy": "regenerate",
+    "max_attempts_per_cell": 4000,
+    "cell_padding_pt": 6
+  },
+  "answers": {
+    "enabled": false
+  },
+  "generators": {
+    "mul_easy": {
+      "type": "single_op",
+      "op": "*",
+      "n_numbers": 2,
+      "operands": {
+        "min": 1,
+        "max": 999
+      },
+      "rules": {
+        "non_negative": true
+      },
+      "limits": {
+        "max_intermediate_digits": 6
+      }
+    },
+    "div_easy": {
+      "type": "single_op",
+      "op": "/",
+      "n_numbers": 2,
+      "operands": {
+        "min": 1,
+        "max": 999
+      },
+      "rules": {
+        "require_integer_division": true,
+        "non_negative": true,
+        "non_negative_intermediate": true
+      },
+      "limits": {
+        "max_intermediate_digits": 5
+      }
+    },
+    "mixed_5": {
+      "type": "mixed",
+      "n_numbers": 4,
+      "operators": [
+        "+",
+        "-",
+        "*",
+        "/"
+      ],
+      "operator_weights": {
+        "+": 3,
+        "-": 3,
+        "*": 2,
+        "/": 1
+      },
+      "operands_by_operator": {
+        "+": {
+          "min": 10,
+          "max": 999
+        },
+        "-": {
+          "min": 10,
+          "max": 999
+        },
+        "*": {
+          "min": 2,
+          "max": 50
+        },
+        "/": {
+          "min": 2,
+          "max": 50
+        }
+      },
+      "brackets": {
+        "enabled": false
+      },
+      "rules": {
+        "non_negative": true,
+        "non_negative_intermediate": true,
+        "require_integer_division": true
+      },
+      "limits": {
+        "max_operand_digits": 3,
+        "max_intermediate_digits": 5,
+        "max_final_digits": 5
+      }
+    }
+  },
+  "columns": [
+    {
+      "generator": "mul_easy"
+    },
+    {
+      "generator": "mul_easy"
+    },
+    {
+      "generator": "div_easy"
+    },
+    {
+      "generator": "div_easy"
+    },
+    {
+      "generator": "mixed_5"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "meta": { "title": "Elderly Gentle" },
+  "seed": 2026,
+
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margin_mm": { "top": 14, "right": 12, "bottom": 14, "left": 12 }
+  },
+
+  "typography": {
+    "font_name": "Times-Roman",
+    "font_size": 16,
+    "line_gap": 6
+  },
+
+  "layout": {
+    "mode": "table_by_columns",
+    "rows_per_column": 28,
+    "overflow_policy": "regenerate",
+    "max_attempts_per_cell": 5000,
+    "cell_padding_pt": 6
+  },
+
+  "answers": { "enabled": false },
+
+  "generators": {
+    "mixed_4": {
+      "type": "mixed",
+      "n_numbers": 4,
+      "operators": ["+", "-", "*", "/"],
+      "operator_weights": { "+": 4, "-": 4, "*": 2, "/": 1 },
+      "operands_by_operator": {
+        "+": { "min": 10, "max": 999 },
+        "-": { "min": 10, "max": 999 },
+        "*": { "min": 2, "max": 25 },
+        "/": { "min": 2, "max": 25 }
+      },
+      "brackets": { "enabled": false },
+      "rules": {
+        "non_negative": true,
+        "non_negative_intermediate": true,
+        "require_integer_division": true
+      },
+      "limits": {
+        "max_operand_digits": 3,
+        "max_intermediate_digits": 4,
+        "max_final_digits": 4
+      }
+    }
+  },
+
+  "columns": [
+    { "generator": "mixed_4" },
+    { "generator": "mixed_4" },
+    { "generator": "mixed_4" }
+  ]
+}

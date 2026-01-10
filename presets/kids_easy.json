@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "meta": { "title": "Kids Easy" },
+  "seed": 42,
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margin_mm": { "top": 12, "right": 12, "bottom": 12, "left": 12 }
+  },
+  "typography": { "font_name": "Times-Roman", "font_size": 16, "line_gap": 6 },
+  "layout": {
+    "mode": "table_by_columns",
+    "rows_per_column": 32,
+    "overflow_policy": "regenerate",
+    "max_attempts_per_cell": 2000,
+    "cell_padding_pt": 6
+  },
+  "answers": { "enabled": false },
+  "generators": {
+    "add": {
+      "type": "single_op",
+      "op": "+",
+      "n_numbers": 2,
+      "operands": { "min": 0, "max": 99 },
+      "rules": { "non_negative": true, "non_negative_intermediate": true },
+      "limits": { "max_intermediate_digits": 3, "max_final_digits": 3 }
+    },
+    "sub": {
+      "type": "single_op",
+      "op": "-",
+      "n_numbers": 2,
+      "operands": { "min": 0, "max": 99 },
+      "rules": { "non_negative": true, "non_negative_intermediate": true },
+      "limits": { "max_intermediate_digits": 2, "max_final_digits": 2 }
+    }
+  },
+  "columns": [
+    { "generator": "add" },
+    { "generator": "add" },
+    { "generator": "sub" },
+    { "generator": "sub" }
+  ]
+}
