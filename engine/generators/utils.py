@@ -23,6 +23,6 @@ def weighted_choice(rng: random.Random, items: List[str], weights: Optional[Dict
 
     x = rng.random() * total
     for it, c in zip(items, cum):
-        if x <= c:
+        if x < c:
             return it
     return items[-1]

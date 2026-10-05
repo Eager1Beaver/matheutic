@@ -5,20 +5,11 @@ from typing import Any, Dict, List, Tuple
 
 from ..expr import Expression, Brackets
 from .utils import weighted_choice
+from config.schema import operand_range
 
 
 def _range_for_op(gen_cfg: Dict[str, Any], op: str) -> Tuple[int, int]:
-    by_op = gen_cfg.get('operands_by_operator') or {}
-    if op in by_op:
-        lo = int(by_op[op].get('min'))
-        hi = int(by_op[op].get('max'))
-        return lo, hi
-
-    # Fallback: a global operands range if provided
-    operands = gen_cfg.get('operands') or {}
-    lo = int(operands.get('min', 1))
-    hi = int(operands.get('max', 100))
-    return lo, hi
+    return operand_range(gen_cfg, op)
 
 
 def _subtrahend_range(lo: int, hi: int) -> Tuple[int, int]:
@@ -36,18 +27,9 @@ def generate_mixed(rng: random.Random, gen_cfg: Dict[str, Any]) -> Expression:
     weights = gen_cfg.get('operator_weights') or None
 
     rules = gen_cfg.get('rules', {}) or {}
-    non_negative_intermediate = bool(rules.get('non_negative_intermediate', False))
+    non_negative_intermediate = rules.get('non_negative_intermediate', rules.get('non_negative', False))
 
     ops: List[str] = [weighted_choice(rng, ops_allowed, weights) for _ in range(n_numbers - 1)]
-
-    # If we care about non-negative intermediate results, the first additive operator being '-'
-    # makes it very easy to go negative in the final +- pass. Nudge it toward '+'.
-    if non_negative_intermediate:
-        for i, op in enumerate(ops):
-            if op in ('+', '-'):
-                if op == '-':
-                    ops[i] = '+'
-                break
 
     # Generate numbers sequentially, using the operator to the left as a hint for scale.
     numbers: List[int] = []

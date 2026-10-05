@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
-from config.schema import apply_defaults, validate_config
+from config.schema import normalize_config
 
 
 def load_config(path: str | Path) -> Dict[str, Any]:
@@ -12,6 +12,4 @@ def load_config(path: str | Path) -> Dict[str, Any]:
     with p.open('r', encoding='utf-8') as f:
         cfg = json.load(f)
 
-    cfg = apply_defaults(cfg)
-    validate_config(cfg)
-    return cfg
+    return normalize_config(cfg)

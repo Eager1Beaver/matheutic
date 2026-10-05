@@ -19,7 +19,10 @@ def _pagesize(cfg: Dict[str, Any]) -> tuple[float, float]:
 
 
 def _string_width(text: str, font_name: str, font_size: float) -> float:
-    return pdfmetrics.stringWidth(text, font_name, font_size)
+    try:
+        return pdfmetrics.stringWidth(text, font_name, font_size)
+    except KeyError as error:
+        raise ValueError(f'PDF font is not registered: {font_name}') from error
 
 
 def export_worksheet_pdf(
@@ -36,6 +39,11 @@ def export_worksheet_pdf(
     """
 
     out_path = Path(out_path)
+    if not columns or not columns[0] or any(len(col) != len(columns[0]) for col in columns):
+        raise ValueError('Worksheet columns must be non-empty and have equal row counts')
+    if answers is not None and (len(answers) != len(columns)
+            or any(len(a) != len(c) for a, c in zip(answers, columns))):
+        raise ValueError('Answer key dimensions must match the worksheet')
     page_cfg = cfg['page']
     layout = cfg['layout']
     typo = cfg['typography']

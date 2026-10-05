@@ -4,6 +4,7 @@ from typing import Any, Dict, Tuple
 
 from engine.expr import Expression
 from engine.eval import evaluate_with_steps, EvalError
+from config.schema import operand_range, validate_generator_config
 
 
 def _digits(n: int) -> int:
@@ -18,6 +19,18 @@ def _digits(n: int) -> int:
 
 
 def validate_expression(expr: Expression, gen_cfg: Dict[str, Any]) -> Tuple[bool, str, int]:
+    validate_generator_config(gen_cfg)
+    if len(expr.numbers) != gen_cfg['n_numbers']:
+        return False, 'operand_count_mismatch', 0
+    allowed = [gen_cfg['op']] if gen_cfg['type'] == 'single_op' else gen_cfg['operators']
+    if any(op not in allowed for op in expr.ops):
+        return False, 'operator_not_allowed', 0
+    if expr.brackets and not (gen_cfg.get('brackets') or {}).get('enabled', False):
+        return False, 'brackets_not_allowed', 0
+    for i, number in enumerate(expr.numbers):
+        lo, hi = operand_range(gen_cfg, expr.ops[max(0, i - 1)])
+        if not lo <= number <= hi:
+            return False, 'operand_out_of_range', 0
     rules = gen_cfg.get('rules', {}) or {}
     limits = gen_cfg.get('limits', {}) or {}
 

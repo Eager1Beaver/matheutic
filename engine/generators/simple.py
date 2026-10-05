@@ -18,25 +18,28 @@ def generate_single_op(rng: random.Random, gen_cfg: Dict[str, Any]) -> Expressio
         return rng.randint(a, b)
 
     if op == '/':
-        require_int = bool(rules.get('require_integer_division', True))
-        if not require_int:
-            # TODO: for now only clean integer division is supported.
-            require_int = True
-
         # Choose divisors and a final result, then build the dividend so every step divides evenly.
         divisors: List[int] = []
-        for _ in range(n_numbers - 1):
-            d = rint(max(lo, 1), hi)
-            if d == 0:
-                d = 1
+        product = 1
+        minimum_divisor = max(lo, 1)
+        for index in range(n_numbers - 1):
+            # Reserve room for remaining divisors when the dividend must be
+            # positive. This avoids almost-certain rejection on long chains.
+            upper = hi
+            if lo > 0:
+                remaining = n_numbers - 2 - index
+                upper = min(hi, hi // (product * minimum_divisor**remaining))
+            d = rint(minimum_divisor, upper)
             divisors.append(d)
+            product *= d
 
-        result = rint(lo, hi)
-        dividend = result
-        for d in divisors:
-            dividend *= d
+        # The quotient is not an input operand. Bound the dividend, rather than
+        # requiring the quotient to lie in the operand range as well.
+        q_min = -(-lo // product)
+        q_max = hi // product
+        dividend = rint(q_min, q_max) * product if q_min <= q_max else product
 
-        # If dividend doesn't fit operand bounds, caller will retry via validation loop.
+        # Unusable divisor combinations are rejected by the shared validator.
         numbers = [dividend] + divisors
         ops = ['/'] * (n_numbers - 1)
         return Expression(numbers=numbers, ops=ops)

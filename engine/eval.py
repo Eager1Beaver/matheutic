@@ -38,7 +38,7 @@ def _apply_op(a: int, op: str, b: int, require_integer_division: bool) -> int:
             raise DivisionByZero('division by zero')
         if require_integer_division and (a % b != 0):
             raise NonIntegerDivision(f'{a} / {b} is not an integer')
-        return a // b  # if not require_integer_division, still do floor; not validated anyway
+        return a // b
     raise EvalError(f'unknown operator: {op}')
 
 
@@ -72,6 +72,8 @@ def _eval_no_brackets(numbers: List[int], ops: List[str], require_integer_divisi
 
 
 def evaluate_with_steps(expr: Expression, require_integer_division: bool = True) -> Tuple[int, List[Step]]:
+    if require_integer_division is not True:
+        raise EvalError('only integer division is supported')
     # Apply a single level of brackets (no nesting)
     nums = list(expr.numbers)
     ops = list(expr.ops)
