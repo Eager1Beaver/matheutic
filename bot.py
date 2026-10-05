@@ -11,6 +11,8 @@ from telegram.ext import (
     filters,
 )
 
+from ai.groq_provider import GroqProvider
+
 
 load_dotenv()
 
@@ -30,6 +32,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+ai = GroqProvider()
+
 
 async def start(
     update: Update,
@@ -39,19 +43,41 @@ async def start(
     first_name = user.first_name if user else "there"
 
     await update.message.reply_text(
-        f"Hello, {first_name}. Matheutic is online.\n\n"
-        "For now, I simply echo any text message you send me."
+        f"Hello, {first_name}. I'm Matheutic.\n\n"
+        "For now, you can send me a message and I'll reply "
+        "using an AI model."
     )
 
 
-async def echo(
+async def chat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    if update.message and update.message.text:
+    if not update.message or not update.message.text:
+        return
+
+    user_message = update.message.text
+
+    logger.info(
+        "Received message from Telegram user %s",
+        update.effective_user.id
+        if update.effective_user
+        else "unknown",
+    )
+
+    try:
+        response = await ai.reply(user_message)
+
+    except RuntimeError:
+        logger.exception("AI request failed.")
+
         await update.message.reply_text(
-            f"You said: {update.message.text}"
+            "I couldn't generate a response right now. "
+            "Please try again."
         )
+        return
+
+    await update.message.reply_text(response)
 
 
 def main() -> None:
@@ -70,7 +96,7 @@ def main() -> None:
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            echo,
+            chat,
         )
     )
 
