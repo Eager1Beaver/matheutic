@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Dict, List
+from typing import any, dict, list
 
 from ..expr import Expression
 
 
-def generate_single_op(rng: random.Random, gen_cfg: Dict[str, Any]) -> Expression:
+def generate_single_op(rng: random.Random, gen_cfg: dict[str, any]) -> Expression:
     op = gen_cfg['op']
     n_numbers = int(gen_cfg['n_numbers'])
     operands = gen_cfg['operands']
@@ -19,7 +19,7 @@ def generate_single_op(rng: random.Random, gen_cfg: Dict[str, Any]) -> Expressio
 
     if op == '/':
         # Choose divisors and a final result, then build the dividend so every step divides evenly.
-        divisors: List[int] = []
+        divisors: list[int] = []
         product = 1
         minimum_divisor = max(lo, 1)
         for index in range(n_numbers - 1):

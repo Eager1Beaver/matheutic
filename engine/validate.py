@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import any, dict, tuple
 
-from engine.expr import Expression
-from engine.eval import evaluate_with_steps, EvalError
 from config.schema import operand_range, validate_generator_config
+from engine.eval import EvalError, evaluate_with_steps
+from engine.expr import Expression
 
 
 def _digits(n: int) -> int:
@@ -18,7 +18,7 @@ def _digits(n: int) -> int:
     return d
 
 
-def validate_expression(expr: Expression, gen_cfg: Dict[str, Any]) -> Tuple[bool, str, int]:
+def validate_expression(expr: Expression, gen_cfg: dict[str, any]) -> tuple[bool, str, int]:
     validate_generator_config(gen_cfg)
     if len(expr.numbers) != gen_cfg['n_numbers']:
         return False, 'operand_count_mismatch', 0

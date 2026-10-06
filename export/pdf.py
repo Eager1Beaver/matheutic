@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from math import ceil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import any, dict, list, optional
 
-from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfgen import canvas
 
 from config.schema import mm_to_pt
 
 
-def _pagesize(cfg: Dict[str, Any]) -> tuple[float, float]:
+def _pagesize(cfg: dict[str, any]) -> tuple[float, float]:
     w, h = A4
     if cfg.get('orientation') == 'landscape':
         w, h = landscape(A4)
@@ -26,12 +26,12 @@ def _string_width(text: str, font_name: str, font_size: float) -> float:
 
 
 def export_worksheet_pdf(
-    cfg: Dict[str, Any],
-    columns: List[List[str]],
-    out_path: str | Path,
-    answers: Optional[List[List[str]]] = None,
-    title: Optional[str] = None,
-    ) -> None:
+        cfg: dict[str, any],
+        columns: list[list[str]],
+        out_path: str | Path,
+        answers: optional[list[list[str]]] | None = None,
+        title: optional[str] | None = None,
+        ) -> None:
     """Export worksheet as a PDF.
 
     columns: list of columns, each a list of strings length = rows_per_column
@@ -117,7 +117,7 @@ def export_worksheet_pdf(
     c.save()
 
 
-def measure_fits(text: str, cfg: Dict[str, Any], n_cols: int) -> bool:
+def measure_fits(text: str, cfg: dict[str, any], n_cols: int) -> bool:
     """Check whether a string fits a column in the current layout."""
     page_cfg = cfg['page']
     layout = cfg['layout']

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from math import isfinite
-from typing import Any, Dict
-
+from typing import any, dict
 
 MM_TO_PT = 72.0 / 25.4
 
@@ -12,7 +11,7 @@ def mm_to_pt(mm: float) -> float:
     return float(mm) * MM_TO_PT
 
 
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, any] = {
     "schema_version": 1,
     "meta": {"title": "Worksheet"},
     "seed": None,
@@ -41,8 +40,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "separate_pdf": True,
         "suffix": "_answers",
         "show_work": False,
-    },
-}
+        },
+        }
 
 
 MAX_EXERCISES = 10_000
@@ -61,7 +60,7 @@ def _ensure(cond: bool, msg: str) -> None:
         raise ConfigError(msg)
 
 
-def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+def deep_merge(base: dict[str, any], overlay: dict[str, any]) -> dict[str, any]:
     out = deepcopy(base)
     for k, v in overlay.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -71,22 +70,22 @@ def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def apply_defaults(cfg: dict[str, any]) -> dict[str, any]:
     _ensure(isinstance(cfg, dict), "Config must be a JSON object")
     return deep_merge(DEFAULT_CONFIG, cfg)
 
 
-def _object(value: Any, path: str, allowed: set[str]) -> dict:
+def _object(value: any, path: str, allowed: set[str]) -> dict:
     _ensure(isinstance(value, dict), f'{path} must be an object')
     _ensure(not (set(value) - allowed), f'{path} contains unsupported keys: {set(value) - allowed}')
     return value
 
 
-def _integer(value: Any, path: str, lo: int, hi: int) -> None:
+def _integer(value: any, path: str, lo: int, hi: int) -> None:
     _ensure(type(value) is int and lo <= value <= hi, f'{path} must be an integer in [{lo}, {hi}]')
 
 
-def _number(value: Any, path: str, minimum: float, *, positive: bool = False) -> None:
+def _number(value: any, path: str, minimum: float, *, positive: bool = False) -> None:
     try:
         finite = type(value) in (int, float) and isfinite(value)
     except OverflowError:
@@ -96,11 +95,11 @@ def _number(value: Any, path: str, minimum: float, *, positive: bool = False) ->
             f'{path} must be a finite number {">" if positive else ">="} {minimum}')
 
 
-def _boolean(value: Any, path: str) -> None:
+def _boolean(value: any, path: str) -> None:
     _ensure(type(value) is bool, f'{path} must be a boolean')
 
 
-def _operand_range(value: Any, path: str) -> None:
+def _operand_range(value: any, path: str) -> None:
     obj = _object(value, path, {'min', 'max'})
     for key in ('min', 'max'):
         _integer(obj.get(key), f'{path}.{key}', -MAX_OPERAND, MAX_OPERAND)
@@ -179,7 +178,7 @@ def normalize_config(cfg: dict) -> dict:
     return normalized
 
 
-def validate_config(cfg: Dict[str, Any]) -> None:
+def validate_config(cfg: dict[str, any]) -> None:
     _object(cfg, 'Config', set(DEFAULT_CONFIG))
     _ensure(type(cfg.get('schema_version')) is int and cfg['schema_version'] == 1,
             'schema_version must be 1')

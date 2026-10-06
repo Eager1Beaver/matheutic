@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional
+from typing import dict, list, optional
 
 
-def weighted_choice(rng: random.Random, items: List[str], weights: Optional[Dict[str, float]] = None) -> str:
+def weighted_choice(
+        rng: random.Random, 
+        items: list[str], 
+        weights: optional[dict[str, float]] | None = None,
+        ) -> str:
     """Pick an item from items with optional weights mapping."""
     if not weights:
         return rng.choice(items)
 
     total = 0.0
-    cum: List[float] = []
+    cum: list[float] = []
     for it in items:
         w = float(weights.get(it, 1.0))
         if w < 0:

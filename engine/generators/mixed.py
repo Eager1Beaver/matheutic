@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Dict, List, Tuple
+from typing import any, dict, list, tuple
 
-from ..expr import Expression, Brackets
-from .utils import weighted_choice
 from config.schema import operand_range
 
+from ..expr import Brackets, Expression
+from .utils import weighted_choice
 
-def _range_for_op(gen_cfg: Dict[str, Any], op: str) -> Tuple[int, int]:
+
+def _range_for_op(gen_cfg: dict[str, any], op: str) -> tuple[int, int]:
     return operand_range(gen_cfg, op)
 
 
-def _subtrahend_range(lo: int, hi: int) -> Tuple[int, int]:
+def _subtrahend_range(lo: int, hi: int) -> tuple[int, int]:
     """Bias subtraction to pick smaller right-hand operands."""
     if hi <= lo:
         return lo, hi
@@ -21,18 +22,18 @@ def _subtrahend_range(lo: int, hi: int) -> Tuple[int, int]:
     return lo, mid
 
 
-def generate_mixed(rng: random.Random, gen_cfg: Dict[str, Any]) -> Expression:
+def generate_mixed(rng: random.Random, gen_cfg: dict[str, any]) -> Expression:
     n_numbers = int(gen_cfg['n_numbers'])
-    ops_allowed: List[str] = list(gen_cfg['operators'])
+    ops_allowed: list[str] = list(gen_cfg['operators'])
     weights = gen_cfg.get('operator_weights') or None
 
     rules = gen_cfg.get('rules', {}) or {}
     non_negative_intermediate = rules.get('non_negative_intermediate', rules.get('non_negative', False))
 
-    ops: List[str] = [weighted_choice(rng, ops_allowed, weights) for _ in range(n_numbers - 1)]
+    ops: list[str] = [weighted_choice(rng, ops_allowed, weights) for _ in range(n_numbers - 1)]
 
     # Generate numbers sequentially, using the operator to the left as a hint for scale.
-    numbers: List[int] = []
+    numbers: list[int] = []
     lo0, hi0 = _range_for_op(gen_cfg, ops[0])
     if ops[0] == '/' and lo0 == 0:
         lo0 = 1

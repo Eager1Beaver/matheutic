@@ -1,14 +1,17 @@
-"""Reusable, deterministic generation with no CLI, PDF, or provider imports."""
+"""Deterministic arithmetic exercise generation."""
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Callable
+from typing import callable
 
 from config.schema import (
-    ConfigError, MAX_ATTEMPTS, MAX_EXERCISES, MAX_GENERATION_BUDGET,
+    MAX_ATTEMPTS,
+    MAX_EXERCISES,
+    MAX_GENERATION_BUDGET,
+    ConfigError,
     validate_generator_config,
-)
+    )
 from engine.eval import Step, evaluate_with_steps
 from engine.expr import Expression
 from engine.generators.mixed import generate_mixed
@@ -31,9 +34,12 @@ class Exercise:
 
 
 def generate_exercise(
-    rng: random.Random, gen_cfg: dict, *, max_attempts: int = 2000,
-    accept: Callable[[Exercise], bool] | None = None,
-) -> Exercise:
+        rng: random.Random, 
+        gen_cfg: dict, 
+        *, 
+        max_attempts: int = 2000,
+        accept: callable[[Exercise], bool] | None = None,
+        ) -> Exercise:
     """Generate one verified exercise using an explicitly owned random stream.
 
     An optional acceptance filter supports adapter-specific constraints without
@@ -58,12 +64,16 @@ def generate_exercise(
     raise GenerationError(
         f'Failed to generate an exercise after {max_attempts} attempts: {reason}',
         reason=reason, attempts=max_attempts,
-    )
+        )
 
 
 def generate_exercises(
-    gen_cfg: dict, count: int, *, seed: int | None = None, max_attempts: int = 2000,
-) -> tuple[Exercise, ...]:
+        gen_cfg: dict, 
+        count: int, 
+        *, 
+        seed: int | None = None, 
+        max_attempts: int = 2000,
+        ) -> tuple[Exercise, ...]:
     """Generate an exact count, independent of worksheet rows, fonts, or columns."""
     validate_generator_config(gen_cfg)
     if type(count) is not int or not 1 <= count <= MAX_EXERCISES:

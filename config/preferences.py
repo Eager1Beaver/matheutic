@@ -1,6 +1,6 @@
-"""Language preference boundary reserved for future front ends."""
-from dataclasses import dataclass
+"""Validated interface and content language preferences."""
 import re
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

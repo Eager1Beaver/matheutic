@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import dict
 
 from engine.expr import Expression
 
 
-OP_SYMBOL: Dict[str, str] = {
+OP_SYMBOL: dict[str, str] = {
     '+': '+',
     '-': '-',
     '*': '×',

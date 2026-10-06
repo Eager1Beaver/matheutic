@@ -1,11 +1,7 @@
-"""Explicit environment boundary; no credentials are required for worksheets.
-
-This reserves configuration for future adapters. It performs no network calls
-and does not implicitly load .env files or read the environment at import time.
-"""
-from dataclasses import dataclass, field
+"""Application settings read explicitly from environment variables."""
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from config.preferences import UserPreferences
 
@@ -20,6 +16,7 @@ class ApplicationSettings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> 'ApplicationSettings':
+        """Read settings from the supplied mapping or process environment."""
         env = os.environ if environ is None else environ
         return cls(
             ai_provider=env.get('AI_PROVIDER', 'groq'),
@@ -29,5 +26,5 @@ class ApplicationSettings:
             preferences=UserPreferences(
                 interface_language=env.get('INTERFACE_LANGUAGE', 'en'),
                 content_language=env.get('CONTENT_LANGUAGE', 'en'),
-            ),
-        )
+                ),
+                )

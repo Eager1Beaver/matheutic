@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import list, tuple
 
 from engine.expr import Expression
 
@@ -42,10 +42,14 @@ def _apply_op(a: int, op: str, b: int, require_integer_division: bool) -> int:
     raise EvalError(f'unknown operator: {op}')
 
 
-def _eval_no_brackets(numbers: List[int], ops: List[str], require_integer_division: bool) -> Tuple[int, List[Step]]:
+def _eval_no_brackets(
+        numbers: list[int], 
+        ops: list[str], 
+        require_integer_division: bool,
+        ) -> tuple[int, list[Step]]:
     nums = list(numbers)
     o = list(ops)
-    steps: List[Step] = []
+    steps: list[Step] = []
 
     # First pass: */ left-to-right
     i = 0
@@ -71,13 +75,13 @@ def _eval_no_brackets(numbers: List[int], ops: List[str], require_integer_divisi
     return res, steps
 
 
-def evaluate_with_steps(expr: Expression, require_integer_division: bool = True) -> Tuple[int, List[Step]]:
+def evaluate_with_steps(expr: Expression, require_integer_division: bool = True) -> tuple[int, list[Step]]:
     if require_integer_division is not True:
         raise EvalError('only integer division is supported')
     # Apply a single level of brackets (no nesting)
     nums = list(expr.numbers)
     ops = list(expr.ops)
-    all_steps: List[Step] = []
+    all_steps: list[Step] = []
 
     if expr.brackets:
         b = expr.brackets

@@ -62,16 +62,19 @@ class WorksheetFiles:
 
 
 def write_workbook(
-    cfg: dict, out_path: str | Path, *, answers_out: str | Path | None = None,
-) -> WorksheetFiles:
-    """Reusable file workflow shared by the CLI and future front ends."""
+        cfg: dict, 
+        out_path: str | Path, 
+        *, 
+        answers_out: str | Path | None = None,
+        ) -> WorksheetFiles:
+    """Generate worksheet and optional answer-key PDFs, returning their paths."""
     cfg = normalize_config(cfg)
     output = Path(out_path)
     answer_path = None
     if cfg['answers']['enabled']:
         answer_path = Path(answers_out) if answers_out is not None else output.with_name(
             output.stem + cfg['answers']['suffix'] + output.suffix
-        )
+            )
         if answer_path.resolve() == output.resolve():
             raise ValueError('Worksheet and answer key must have different output paths')
     columns, answers = generate_workbook(cfg)
@@ -83,5 +86,5 @@ def write_workbook(
         export_worksheet_pdf(
             cfg, columns, answer_path, answers=answers,
             title=f'{title} - Answers' if title else 'Answers',
-        )
+            )
     return WorksheetFiles(output, answer_path)

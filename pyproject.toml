@@ -1,0 +1,38 @@
+[project]
+name = "matheutic"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "reportlab>=4.4.7,<5",
+]
+
+[project.optional-dependencies]
+coach = [
+    "python-telegram-bot>=22.8",
+    "openai>=3.24.0",
+    "groq>=1.7.0",
+    "python-dotenv>=1.2.4",
+    "pydantic>=2.13.5",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests", "tests.*", "docs", "docs.*"]
+namespaces = false
+
+[project.scripts]
+matheutic = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
