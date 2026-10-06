@@ -6,12 +6,15 @@ from typing import TYPE_CHECKING
 from .errors import AIProviderError
 
 if TYPE_CHECKING:
-    from .schemas import MathProblem
+    from .schemas import MathProblem, RequestInterpretation
 
-class AIProviderError(RuntimeError):
-    """Raised when an AI provider cannot fulfill a request."""
 
 class AIProvider(ABC):
+    @abstractmethod
+    async def interpret_request(self, request: str, language: str = "en") -> RequestInterpretation:
+        """Classify a message and extract a structured arithmetic request."""
+        raise NotImplementedError
+
     @abstractmethod
     async def generate_problem(
         self,
@@ -19,4 +22,4 @@ class AIProvider(ABC):
         language: str = "en",
         ) -> MathProblem:
         """Generate a structured candidate, or raise a typed AIProviderError."""
-        raise AIProviderError
+        raise NotImplementedError

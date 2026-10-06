@@ -32,6 +32,7 @@ _CONSTRAINT_CODES = frozenset({
     "operation_not_allowed", "required_operation_missing", "operation_count_mismatch",
     "operand_out_of_range", "non_integer_division", "final_negative",
     "intermediate_negative", "intermediate_too_large", "final_too_large",
+    "difficulty_mismatch",
     })
 
 
@@ -64,15 +65,20 @@ class ProblemGenerator:
             self, 
             provider: AIProvider, 
             constraints: ProblemConstraints | None = None,
-            *, max_attempts: int = 3
+            *, 
+            max_attempts: int = 3, 
+            difficulty: int | None = None
             ) -> None:
         if constraints is not None and not isinstance(constraints, ProblemConstraints):
             raise TypeError("constraints must be ProblemConstraints")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 5:
             raise ValueError("max_attempts must be an integer from 1 to 5")
+        if difficulty is not None and (type(difficulty) is not int or not 1 <= difficulty <= 5):
+            raise ValueError("difficulty must be an integer from 1 to 5")
         self.provider = provider
         self.constraints = ProblemConstraints() if constraints is None else constraints
         self.max_attempts = max_attempts
+        self.difficulty = difficulty
 
     async def generate(
             self, 
@@ -84,6 +90,8 @@ class ProblemGenerator:
         """Regenerate invalid candidates; propagate unsupported requests and service failures."""
         if not isinstance(request, str) or not request.strip():
             raise UnsupportedProblemRequest("An arithmetic request is required.", reason="empty_request")
+        # TODO: will be more languages; maybe pass a list of supported ones
+        # and an error will be raised specifying supported languages
         if language != "en":
             raise UnsupportedProblemRequest("Problem content must use English.", reason="unsupported_language")
         if self.constraints.max_operand == 0 and (
@@ -108,6 +116,10 @@ class ProblemGenerator:
                         ValidationIssue("statement_too_long", "The problem statement exceeds 4000 characters.")
                         ])
                 analysis = validate_problem(problem, self.constraints)
+                if self.difficulty is not None and problem.difficulty != self.difficulty:
+                    raise ProblemConstraintViolation([
+                        ValidationIssue("difficulty_mismatch", "Declared difficulty does not match the requested level.")
+                        ])
             except ProblemValidationError as error:
                 failure = classify_validation_error(error)
             except GeneratedProblemInvalid as error:

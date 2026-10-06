@@ -11,8 +11,10 @@ from ai.errors import (
     GeneratedProblemInvalid,
     GenerationExhausted,
     ProblemConstraintViolation,
+    RequestInterpretationInvalid,
     UnsupportedProblemRequest,
-    )
+)
+from ai.intent import RequestDecision, RequestInterpreter
 from ai.orchestrator import GenerationRejection, ProblemGenerator, ValidatedProblem
 from ai.provider import AIProvider
 from config.settings import ApplicationSettings
@@ -25,9 +27,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_GEN_ATTEMPTS = 1 # 3
+
 
 def generation_fallback(error: AIProviderError) -> str:
     """Return a learner-facing explanation without provider or validation details."""
+    if isinstance(error, RequestInterpretationInvalid):
+        return (
+            "I couldn't understand that request reliably. Please try rephrasing it, "
+            "for example: 'Give me an easy addition problem with numbers below 20.'"
+            )
     if isinstance(error, UnsupportedProblemRequest):
         if error.reason == "unsupported_language":
             return "I can currently create problems in English. Please ask for an English problem."
@@ -63,6 +72,39 @@ def generation_fallback(error: AIProviderError) -> str:
     return "I couldn't generate a problem right now. Please try again."
 
 
+def request_reply(decision: RequestDecision) -> str:
+    """Return an application-owned invitation or scope explanation for a routed message."""
+    if decision.intent == "off_topic":
+        if decision.reason == "greeting":
+            return "Hello! Would you like to practise addition, subtraction, multiplication or division?"
+        return (
+            "I'm here to help with maths practice. Would you like an addition, "
+            "subtraction, multiplication or division problem?"
+            )
+    if decision.intent == "unsupported_request":
+        if decision.reason == "unsupported_task":
+            return (
+                "I can create one arithmetic word problem at a time. "
+                "Please ask for a single addition, subtraction, multiplication or division problem,"
+                "or their combination."
+                )
+        if decision.reason == "invalid_instructions":
+            return (
+                "Let's practise with mathematically correct problems. "
+                "Tell me which operations or number range you'd like to use."
+                )
+        return generation_fallback(UnsupportedProblemRequest(reason=decision.reason))
+    if decision.reason == "answer_without_problem":
+        return (
+            "Please describe the kind of arithmetic problem you'd like, "
+            "such as 'an easy addition problem with numbers below 20'."
+            )
+    return (
+        "I'm not sure what you'd like to practise. Try asking: "
+        "'Give me an easy addition problem with numbers below 20.'"
+        )
+
+
 def _log_failure(error: AIProviderError) -> None:
     """Log failure categories and safe diagnostics without SDK exception payloads."""
     if isinstance(error, AIServiceUnavailable):
@@ -74,7 +116,7 @@ def _log_failure(error: AIProviderError) -> None:
     elif isinstance(error, GenerationExhausted):
         logger.warning("Problem generation failed: category=%s attempts=%s last_failure=%s",
                        type(error).__name__, error.attempts, type(error.last_failure).__name__)
-    elif isinstance(error, GeneratedProblemInvalid):
+    elif isinstance(error, (GeneratedProblemInvalid, RequestInterpretationInvalid)):
         logger.warning("Problem generation failed: category=%s issues=%s", type(error).__name__,
                        "; ".join(f"{issue.code}: {issue.message}" for issue in error.issues))
     else:
@@ -104,8 +146,11 @@ def _solution_details(analysis: ExpressionAnalysis) -> str:
             )
 
 
-async def _send_development_data(message, rejections: list[GenerationRejection],
-                                 result: ValidatedProblem | None = None) -> None:
+async def _send_development_data(
+        message, 
+        rejections: list[GenerationRejection],
+        result: ValidatedProblem | None = None,
+        ) -> None:
     """Send bounded inspection messages for rejected and verified candidates."""
     for rejection in rejections:
         details = (
@@ -130,7 +175,7 @@ async def _send_development_data(message, rejections: list[GenerationRejection],
             f"[Development data - VERIFIED, attempt {result.attempts}]\n"
             + _candidate_details(result.problem)
             + "\n" + _solution_details(result.analysis)
-        )
+            )
         await message.reply_text(details[:4000], parse_mode=None)
 
 
@@ -148,19 +193,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Present a verified statement or a failure-specific fallback."""
+    """Route a learner message and present a verified problem or a friendly reply."""
     message = update.effective_message
     if message is None or not message.text:
         return
-    generator = ProblemGenerator(
-        context.bot_data["ai_provider"], context.bot_data.get("problem_constraints"),
-        max_attempts=context.bot_data.get("max_generation_attempts", 3),
-        )
+    provider = context.bot_data["ai_provider"]
+    interpreter = RequestInterpreter(provider, context.bot_data.get("problem_constraints"))
     dev_mode = context.bot_data.get("dev_mode", False)
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
     try:
+        decision = await interpreter.interpret(message.text)
+        logger.info("Request routed: intent=%s reason=%s", decision.intent, decision.reason)
+        if decision.intent != "generate_problem":
+            await message.reply_text(request_reply(decision))
+            return
+        generator = ProblemGenerator(
+            provider, decision.constraints, difficulty=decision.difficulty,
+            max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS),
+            )
         result = await generator.generate(
-            request=message.text, language="en",
+            request=decision.generation_request, language=decision.language,
             on_rejection=rejections.append if rejections is not None else None,
             )
     except AIProviderError as error:
@@ -174,9 +226,29 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_development_data(message, rejections, result)
 
 
-def create_application(token: str, provider: AIProvider,
-                       constraints: ProblemConstraints | None = None, *,
-                       dev_mode: bool = False, max_generation_attempts: int = 3) -> Application:
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report unexpected handler failures with a safe learner-facing fallback."""
+    error = context.error
+    logger.error("Unhandled Telegram handler failure: category=%s", type(error).__name__)
+    message = getattr(update, "effective_message", None)
+    if message is None:
+        return
+    text = (generation_fallback(error) if isinstance(error, AIProviderError) else
+            "Something went wrong while handling your request. Please try again.")
+    try:
+        await message.reply_text(text)
+    except Exception as delivery_error:
+        logger.warning("Fallback delivery failed: category=%s", type(delivery_error).__name__)
+
+
+def create_application(
+        token: str, 
+        provider: AIProvider,
+        constraints: ProblemConstraints | None = None, 
+        *,
+        dev_mode: bool = False, 
+        max_generation_attempts: int = MAX_GEN_ATTEMPTS,
+        ) -> Application:
     """Build a polling application with a validation policy and optional development output."""
     generator = ProblemGenerator(provider, constraints, max_attempts=max_generation_attempts)
     if type(dev_mode) is not bool:
@@ -192,6 +264,7 @@ def create_application(token: str, provider: AIProvider,
         })
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    application.add_error_handler(handle_error)
     return application
 
 

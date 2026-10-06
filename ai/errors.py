@@ -17,6 +17,16 @@ class UnsupportedProblemRequest(AIProviderError):
         super().__init__(message)
 
 
+class RequestInterpretationInvalid(AIProviderError):
+    """The request interpreter returned unusable structured output."""
+
+    def __init__(self, issues: Sequence[ValidationIssue]) -> None:
+        self.issues = tuple(issues)
+        if not self.issues:
+            raise ValueError("Invalid interpretations must have at least one validation issue")
+        super().__init__("; ".join(issue.message for issue in self.issues))
+
+
 class GeneratedProblemInvalid(AIProviderError):
     """A generated candidate fails structural or mathematical validation."""
 

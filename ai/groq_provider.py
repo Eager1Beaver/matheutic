@@ -1,41 +1,23 @@
 import json
 import os
+from typing import TypeVar
 
 import groq
 from groq import AsyncGroq
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from core.problem_validator import ValidationIssue
 
-from .errors import AIServiceUnavailable, GeneratedProblemInvalid
+from .errors import (
+    AIServiceUnavailable,
+    GeneratedProblemInvalid,
+    RequestInterpretationInvalid,
+    )
+from .prompts import GENERATE_PROBLEM_PROMPT, INTERPRET_REQUEST_PROMPT
 from .provider import AIProvider
-from .schemas import MathProblem
+from .schemas import MathProblem, RequestInterpretation
 
-# TODO: expect to have a prompts subfolder with prompt templates for different use cases
-# e.g. problem generation and hints
-SYSTEM_PROMPT = """
-You generate arithmetic word problems for Matheutic.
-
-Matheutic is an arithmetic practice application for children
-developing arithmetic skills and adults doing regular mental practice.
-
-Generate exactly one arithmetic word problem satisfying the user's request.
-
-Rules:
-- The mathematical problem must be solvable.
-- The expression must represent exactly the story in the statement.
-- The answer must be the result of that expression.
-- Use only arithmetic operations: +, -, *, /.
-- Use non-negative decimal integer literals without unary signs.
-- List each distinct used operator exactly once in operations.
-- The final answer must be an integer.
-- Every division must produce an exact integer result, including intermediate steps.
-- Avoid ambiguous wording.
-- Keep the problem concise.
-- Difficulty must be an integer from 1 to 5.
-- All learner-visible text must use the requested language.
-- Do not include hints, explanations, commentary, or markdown.
-""".strip()
+OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
 
 class GroqProvider(AIProvider):
@@ -46,7 +28,7 @@ class GroqProvider(AIProvider):
             raise RuntimeError(
                 "GROQ_API_KEY is not set. "
                 "Add it to your .env file."
-            )
+                )
 
         self.model = os.getenv(
             "AI_MODEL",
@@ -64,28 +46,49 @@ class GroqProvider(AIProvider):
             request: str,
             language: str = "en",
             ) -> MathProblem:
+        """Return a schema-validated arithmetic candidate from Groq."""
+        return await self._structured_completion(
+            request, language, system_prompt=GENERATE_PROBLEM_PROMPT,
+            schema_name="math_problem", output_model=MathProblem,
+            invalid_error=GeneratedProblemInvalid,
+            )
+
+    async def interpret_request(self, request: str, language: str = "en") -> RequestInterpretation:
+        """Return a schema-validated intent and arithmetic requirements from Groq."""
+        return await self._structured_completion(
+            request, language, system_prompt=INTERPRET_REQUEST_PROMPT,
+            schema_name="request_interpretation", output_model=RequestInterpretation,
+            invalid_error=RequestInterpretationInvalid,
+        )
+
+    async def _structured_completion(
+        self, request: str, language: str, *, system_prompt: str,
+        schema_name: str, output_model: type[OutputModel],
+        invalid_error: type[GeneratedProblemInvalid] | type[RequestInterpretationInvalid],
+        ) -> OutputModel:
+        """Request typed JSON and map service and structured-output failures."""
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
-                        "content": SYSTEM_PROMPT, 
+                        "content": system_prompt,
                     },
                     {
                         "role": "user",
                         "content": (
                             f"Target language: {language}\n\n"
-                            f"Problem request:\n{request}"
+                            f"User input:\n{request}"
                             ),
                     },
                     ],
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "math_problem",
+                        "name": schema_name,
                         "strict": True,
-                        "schema": MathProblem.model_json_schema(),
+                        "schema": output_model.model_json_schema(),
                         },
                         },
                         )
@@ -106,7 +109,7 @@ class GroqProvider(AIProvider):
             if exc.status_code == 400 and isinstance(code, str) and code in {
                 "json_validate_failed", "json_schema_validation_failed", "schema_validation_failed",
                 }:
-                raise GeneratedProblemInvalid([
+                raise invalid_error([
                     ValidationIssue("structured_output_rejected", "The service rejected its generated JSON.")
                     ]) from exc
             raise AIServiceUnavailable(reason="http_status", status_code=exc.status_code) from exc
@@ -117,22 +120,22 @@ class GroqProvider(AIProvider):
         content = completion.choices[0].message.content if completion.choices else None
 
         if not content:
-            raise GeneratedProblemInvalid([
-                ValidationIssue("empty_response", "The service returned no problem content.")
+            raise invalid_error([
+                ValidationIssue("empty_response", "The service returned no structured content.")
                 ])
 
         try:
             data = json.loads(content)
         except (ValueError, RecursionError) as exc:
-            raise GeneratedProblemInvalid([
-                ValidationIssue("invalid_json", "Generated content is not valid problem JSON.")
+            raise invalid_error([
+                ValidationIssue("invalid_json", "Generated content is not valid JSON.")
                 ]) from exc
 
         try:
-            return MathProblem.model_validate(data)
+            return output_model.model_validate(data)
         except ValidationError as exc:
             # Error types are useful diagnostics; Pydantic input values can contain private text.
             error_types = sorted({error["type"] for error in exc.errors(include_input=False)})
-            raise GeneratedProblemInvalid([
-                ValidationIssue("invalid_schema", "Problem schema validation failed: " + ", ".join(error_types))
+            raise invalid_error([
+                ValidationIssue("invalid_schema", "Structured output validation failed: " + ", ".join(error_types))
                 ]) from exc
