@@ -13,16 +13,25 @@ class ApplicationSettings:
     groq_api_key: str | None = field(default=None, repr=False)
     telegram_bot_token: str | None = field(default=None, repr=False)
     preferences: UserPreferences = field(default_factory=UserPreferences)
+    dev_mode: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.dev_mode) is not bool:
+            raise ValueError('dev_mode must be a boolean')
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> 'ApplicationSettings':
         """Read settings from the supplied mapping or process environment."""
         env = os.environ if environ is None else environ
+        dev_mode = env.get('MATHEUTIC_DEV_MODE', 'false').strip().lower()
+        if dev_mode not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off'):
+            raise ValueError('MATHEUTIC_DEV_MODE must be true or false')
         return cls(
             ai_provider=env.get('AI_PROVIDER', 'groq'),
             ai_model=env.get('AI_MODEL', 'openai/gpt-oss-20b'),
             groq_api_key=env.get('GROQ_API_KEY') or None,
             telegram_bot_token=env.get('TELEGRAM_BOT_TOKEN') or None,
+            dev_mode=dev_mode in ('true', '1', 'yes', 'on'),
             preferences=UserPreferences(
                 interface_language=env.get('INTERFACE_LANGUAGE', 'en'),
                 content_language=env.get('CONTENT_LANGUAGE', 'en'),
