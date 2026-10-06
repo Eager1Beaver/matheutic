@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from typing import dict
 
 from engine.expr import Expression
-
 
 OP_SYMBOL: dict[str, str] = {
     '+': '+',

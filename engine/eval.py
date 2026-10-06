@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import list, tuple
 
 from engine.expr import Expression
 

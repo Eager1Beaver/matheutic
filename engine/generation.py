@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import callable
+from collections.abc import Callable
 
 from config.schema import (
     MAX_ATTEMPTS,
@@ -38,7 +38,7 @@ def generate_exercise(
         gen_cfg: dict, 
         *, 
         max_attempts: int = 2000,
-        accept: callable[[Exercise], bool] | None = None,
+        accept: Callable[[Exercise], bool] | None = None,
         ) -> Exercise:
     """Generate one verified exercise using an explicitly owned random stream.
 

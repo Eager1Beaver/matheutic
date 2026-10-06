@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import sequence, optional
+from collections.abc import Sequence
 
 OPERATORS = ('+', '-', '*', '/')
 
@@ -18,9 +18,9 @@ class Brackets:
 
 @dataclass(frozen=True)
 class Expression:
-    numbers: sequence[int]
-    ops: sequence[str]  # length = len(numbers) - 1
-    brackets: optional[Brackets] = None
+    numbers: Sequence[int]
+    ops: Sequence[str]  # length = len(numbers) - 1
+    brackets: Brackets | None = None
 
     def __post_init__(self):
         if not isinstance(self.numbers, (list, tuple)) or not isinstance(self.ops, (list, tuple)):

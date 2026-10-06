@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import random
-from typing import any, dict, list
+from typing import Any
 
 from ..expr import Expression
 
 
-def generate_single_op(rng: random.Random, gen_cfg: dict[str, any]) -> Expression:
+def generate_single_op(rng: random.Random, gen_cfg: dict[str, Any]) -> Expression:
     op = gen_cfg['op']
     n_numbers = int(gen_cfg['n_numbers'])
     operands = gen_cfg['operands']

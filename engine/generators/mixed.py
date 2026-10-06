@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import any, dict, list, tuple
+from typing import Any
 
 from config.schema import operand_range
 
@@ -9,7 +9,7 @@ from ..expr import Brackets, Expression
 from .utils import weighted_choice
 
 
-def _range_for_op(gen_cfg: dict[str, any], op: str) -> tuple[int, int]:
+def _range_for_op(gen_cfg: dict[str, Any], op: str) -> tuple[int, int]:
     return operand_range(gen_cfg, op)
 
 
@@ -22,7 +22,7 @@ def _subtrahend_range(lo: int, hi: int) -> tuple[int, int]:
     return lo, mid
 
 
-def generate_mixed(rng: random.Random, gen_cfg: dict[str, any]) -> Expression:
+def generate_mixed(rng: random.Random, gen_cfg: dict[str, Any]) -> Expression:
     n_numbers = int(gen_cfg['n_numbers'])
     ops_allowed: list[str] = list(gen_cfg['operators'])
     weights = gen_cfg.get('operator_weights') or None
