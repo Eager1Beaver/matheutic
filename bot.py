@@ -1,109 +1,117 @@
+"""Telegram handlers for presenting mathematically validated arithmetic problems."""
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
-from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
     filters,
-)
-
-from ai.groq_provider import GroqProvider
-
-
-load_dotenv()
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN is not set. "
-        "Add it to your .env file."
     )
 
+from ai.groq_provider import GroqProvider
+from ai.provider import AIProvider, AIProviderError
+from core.constraints import ProblemConstraints
+from core.problem_validator import ProblemValidationError, validate_problem
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
-)
+if TYPE_CHECKING:
+    from telegram import Update
+    from telegram.ext import (
+        ContextTypes,
+        )
 
 logger = logging.getLogger(__name__)
 
-ai = GroqProvider()
 
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Welcome a learner and invite an arithmetic request."""
+    message = update.effective_message
+    if message is None:
+        return
     user = update.effective_user
     first_name = user.first_name if user else "there"
-
-    await update.message.reply_text(
+    await message.reply_text(
         f"Hello, {first_name}. I'm Matheutic.\n\n"
-        "For now, you can send me a message and I'll reply "
-        "using an AI model."
+        "Describe the kind of arithmetic problem you'd like."
     )
 
 
-async def chat(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    if not update.message or not update.message.text:
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a candidate and present its statement only after validation."""
+    message = update.effective_message
+    if message is None or not message.text:
         return
-
-    user_message = update.message.text
+    
+    provider: AIProvider = context.bot_data["ai_provider"]
+    constraints = context.bot_data.get("problem_constraints", ProblemConstraints())
+    
+    try:
+        problem = await provider.generate_problem(request=message.text, language="en")
+        analysis = validate_problem(problem, constraints)
+    # TODO: Distinguish unsupported requests, invalid generations, and provider failures.
+    except AIProviderError:
+        logger.exception("Problem generation failed.")
+        await message.reply_text("I couldn't generate a problem right now. Please try again.")
+        return
+    except ProblemValidationError as error:
+        logger.warning("Rejected arithmetic candidate: %s", ", ".join(issue.code for issue in error.issues))
+        await message.reply_text("I couldn't generate a valid arithmetic problem. Please try again.")
+        return
+    
+    logger.debug("Validated arithmetic: result=%s operations=%s", analysis.value, analysis.operations)
+    #await message.reply_text(problem.statement)
 
     logger.info(
-        "Received message from Telegram user %s",
-        update.effective_user.id
-        if update.effective_user
-        else "unknown",
+        "Generated MathProblem: %s",
+        problem.model_dump_json(),
     )
 
-    try:
-        response = await ai.reply(user_message)
+    await update.message.reply_text(
+        f"{problem.statement}\n\n"
+        f"[Development data]\n"
+        f"Expression: {problem.expression}\n"
+        f"Answer: {problem.answer}\n"
+        f"Operations: {', '.join(problem.operations)}\n"
+        f"Difficulty: {problem.difficulty}\n"
+        f"Language: {problem.language}"
+    )
 
-    except RuntimeError:
-        logger.exception("AI request failed.")
 
-        await update.message.reply_text(
-            "I couldn't generate a response right now. "
-            "Please try again."
-        )
-        return
+def create_application(
+        token: str, 
+        provider: AIProvider, 
+        constraints: ProblemConstraints | None = None,
+        ) -> Application:
+    """Build a polling application with its provider and validation constraints."""
+    if constraints is not None and not isinstance(constraints, ProblemConstraints):
+        raise TypeError("constraints must be ProblemConstraints")
+    
 
-    await update.message.reply_text(response)
+    application = Application.builder().token(token).build()
+    application.bot_data["ai_provider"] = provider
+    application.bot_data["problem_constraints"] = ProblemConstraints() if constraints is None else constraints
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    return application
 
 
 def main() -> None:
-    logger.info("Starting Matheutic Telegram bot...")
+    """Load credentials, configure logging, and run Telegram long polling."""
 
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .build()
-    )
-
-    application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            chat,
-        )
-    )
-
+    load_dotenv()
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Add it to your .env file.")
+    
+    logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    application = create_application(token, GroqProvider())
     logger.info("Bot is running. Press Ctrl+C to stop.")
-
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
