@@ -11,6 +11,7 @@ from core.constraints import SUPPORTED_OPERATIONS, ProblemConstraints
 from core.problem_validator import ValidationIssue
 
 from .errors import RequestInterpretationInvalid, UnsupportedProblemRequest
+from .policy import natural_number_policy
 
 if TYPE_CHECKING:
     from .provider import AIProvider
@@ -59,7 +60,7 @@ def compile_constraints(spec: ProblemRequest, base: ProblemConstraints) -> Probl
             min_operand=spec.min_operand, max_operand=spec.max_operand,
             min_operations=spec.min_operations, max_operations=spec.max_operations,
             require_integer_division=True,
-            non_negative=spec.non_negative, non_negative_intermediate=spec.non_negative_intermediate,
+            non_negative=True, non_negative_intermediate=True,
             max_intermediate_value=spec.max_intermediate_value, max_final_value=spec.max_final_value,
             )
         allowed = tuple(op for op in SUPPORTED_OPERATIONS
@@ -110,22 +111,34 @@ def compile_decision(interpretation: RequestInterpretation, base: ProblemConstra
         policy = compile_constraints(spec, base)
     except UnsupportedProblemRequest as error:
         return RequestDecision("unsupported_request", error.reason)
-    request = json.dumps({
-        "task_type": "word_problem", "count": 1,
-        "constraints": asdict(policy), "difficulty": spec.difficulty,
-        "language": spec.language, "context": spec.context,
-    }, ensure_ascii=True, sort_keys=True)
+    bounds = {key: value for key, value in asdict(policy).items() if value is not None}
+    # Integer division and non-negative values are fixed generation rules.
+    for key in ("require_integer_division", "non_negative", "non_negative_intermediate"):
+        bounds.pop(key)
+    payload = {"constraints": bounds}
+    if spec.difficulty is not None:
+        payload["difficulty"] = spec.difficulty
+    if spec.context:
+        payload["context"] = spec.context
+    request = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return RequestDecision("generate_problem", "none", request, policy, spec.difficulty, spec.language)
 
 
 class RequestInterpreter:
     """Classify messages before arithmetic generation and enforce the application policy."""
 
-    def __init__(self, provider: AIProvider, constraints: ProblemConstraints | None = None) -> None:
-        if constraints is not None and not isinstance(constraints, ProblemConstraints):
-            raise TypeError("constraints must be ProblemConstraints")
+    def __init__(
+            self, 
+            provider: AIProvider, 
+            constraints: ProblemConstraints | None = None,
+            *, 
+            dev_mode: bool = False,
+            ) -> None:
+        if type(dev_mode) is not bool:
+            raise ValueError("dev_mode must be a boolean")
         self.provider = provider
-        self.constraints = ProblemConstraints() if constraints is None else constraints
+        self.constraints = natural_number_policy(constraints)
+        self.dev_mode = dev_mode
 
     async def interpret(self, request: str) -> RequestDecision:
         """Handle simple messages locally and classify other text through the provider."""
@@ -138,5 +151,7 @@ class RequestInterpreter:
             return RequestDecision("off_topic", "greeting")
         if _ANSWER.fullmatch(text):
             return RequestDecision("clarify", "answer_without_problem")
-        interpretation = await self.provider.interpret_request(request=text, language="en")
+        interpretation = await self.provider.interpret_request(
+            request=text, language="en", dev_mode=self.dev_mode,
+            )
         return compile_decision(interpretation, self.constraints)

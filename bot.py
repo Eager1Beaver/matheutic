@@ -47,6 +47,11 @@ def generation_fallback(error: AIProviderError) -> str:
                 )
         if error.reason == "empty_request":
             return "Describe the kind of arithmetic problem you'd like."
+        if error.reason == "unsupported_math":
+            return (
+                "I can create addition, subtraction, multiplication and exact division problems "
+                "using whole numbers, including zero. Numbers and results must be zero or higher."
+                )
         return (
             "I can create problems using addition, subtraction, multiplication and division. "
             "Please try a different request or simpler constraints."
@@ -127,8 +132,8 @@ def _candidate_details(problem) -> str:
     """Format a candidate's statement and mathematical metadata for development inspection."""
     return (
         f"Expression: {problem.expression}\n"
-        f"Declared answer: {problem.answer}\n"
-        f"Declared operations: {', '.join(problem.operations)}\n"
+        f"Declared answer: {getattr(problem, 'answer', 'not supplied')}\n"
+        f"Declared operations: {', '.join(getattr(problem, 'operations', ())) or 'not supplied'}\n"
         f"Difficulty: {getattr(problem, 'difficulty', 'unspecified')}\n"
         f"Language: {getattr(problem, 'language', 'unspecified')}\n"
         f"Statement: {problem.statement[:1000]}"
@@ -198,8 +203,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None or not message.text:
         return
     provider = context.bot_data["ai_provider"]
-    interpreter = RequestInterpreter(provider, context.bot_data.get("problem_constraints"))
     dev_mode = context.bot_data.get("dev_mode", False)
+    interpreter = RequestInterpreter(
+        provider, context.bot_data.get("problem_constraints"), dev_mode=dev_mode,
+        )
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
     try:
         decision = await interpreter.interpret(message.text)
@@ -210,6 +217,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         generator = ProblemGenerator(
             provider, decision.constraints, difficulty=decision.difficulty,
             max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS),
+            dev_mode=dev_mode,
             )
         result = await generator.generate(
             request=decision.generation_request, language=decision.language,
@@ -250,9 +258,9 @@ def create_application(
         max_generation_attempts: int = MAX_GEN_ATTEMPTS,
         ) -> Application:
     """Build a polling application with a validation policy and optional development output."""
-    generator = ProblemGenerator(provider, constraints, max_attempts=max_generation_attempts)
-    if type(dev_mode) is not bool:
-        raise ValueError("dev_mode must be a boolean")
+    generator = ProblemGenerator(
+        provider, constraints, max_attempts=max_generation_attempts, dev_mode=dev_mode,
+        )
     from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
     application = Application.builder().token(token).build()
@@ -272,7 +280,7 @@ def main() -> None:
     """Load settings and run Telegram long polling with optional development diagnostics."""
     parser = argparse.ArgumentParser(description="Run the Matheutic Telegram coach.")
     parser.add_argument("--dev", action=argparse.BooleanOptionalAction, default=None,
-                        help="Display mathematical development data in Telegram (default: off).")
+                        help="Display development data and log model token usage (default: off).")
     args = parser.parse_args()
 
     from dotenv import load_dotenv

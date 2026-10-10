@@ -26,8 +26,6 @@ class ProblemRequest(BaseModel):
     max_operand: int = Field(ge=0, le=MAX_OPERAND_VALUE)
     min_operations: int = Field(ge=1, le=MAX_OPERATION_COUNT)
     max_operations: int = Field(ge=1, le=MAX_OPERATION_COUNT)
-    non_negative: bool
-    non_negative_intermediate: bool
     max_intermediate_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     max_final_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     difficulty: int | None = Field(ge=1, le=5)
@@ -69,7 +67,9 @@ class RequestInterpretation(BaseModel):
         return self
 
 
-class MathProblem(BaseModel):
+class ProblemContent(BaseModel):
+    """Model-generated story, expression, and difficulty."""
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
     statement: str = Field(
@@ -83,20 +83,18 @@ class MathProblem(BaseModel):
             )
             )
 
-    answer: int = Field(
-        description="The correct integer answer to the arithmetic problem."
-        )
-
-    operations: list[Operation] = Field(
-        description="Each distinct arithmetic operator used in the expression, listed exactly once."
-        )
-
     difficulty: int = Field(
         ge=1,
         le=5,
         description="Difficulty from 1 (very easy) to 5 (hardest)."
         )
 
+
+class MathProblem(ProblemContent):
+    """An arithmetic problem with answer, operators, and content language."""
+
+    answer: int = Field(description="The correct integer answer.")
+    operations: list[Operation] = Field(description="Each distinct used operator, listed once.")
     language: LanguageCode = Field(
         description="Language of all learner-visible text."
         )

@@ -11,6 +11,7 @@ from core.expression import ExpressionAnalysis
 from core.problem_validator import (
     ProblemValidationError,
     ValidationIssue,
+    validate_expression,
     validate_problem,
     )
 
@@ -20,10 +21,11 @@ from .errors import (
     ProblemConstraintViolation,
     UnsupportedProblemRequest,
     )
+from .policy import natural_number_policy
 from .provider import AIProvider
 
 if TYPE_CHECKING:
-    from .schemas import MathProblem
+    from .schemas import MathProblem, ProblemContent
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ class ValidatedProblem:
 class GenerationRejection:
     attempt: int
     error: GeneratedProblemInvalid
-    problem: MathProblem | None = None
+    problem: ProblemContent | MathProblem | None = None
 
 
 def classify_validation_error(error: ProblemValidationError) -> GeneratedProblemInvalid:
@@ -67,7 +69,8 @@ class ProblemGenerator:
             constraints: ProblemConstraints | None = None,
             *, 
             max_attempts: int = 3, 
-            difficulty: int | None = None
+            difficulty: int | None = None,
+            dev_mode: bool = False,
             ) -> None:
         if constraints is not None and not isinstance(constraints, ProblemConstraints):
             raise TypeError("constraints must be ProblemConstraints")
@@ -75,10 +78,13 @@ class ProblemGenerator:
             raise ValueError("max_attempts must be an integer from 1 to 5")
         if difficulty is not None and (type(difficulty) is not int or not 1 <= difficulty <= 5):
             raise ValueError("difficulty must be an integer from 1 to 5")
+        if type(dev_mode) is not bool:
+            raise ValueError("dev_mode must be a boolean")
         self.provider = provider
-        self.constraints = ProblemConstraints() if constraints is None else constraints
+        self.constraints = natural_number_policy(constraints)
         self.max_attempts = max_attempts
         self.difficulty = difficulty
+        self.dev_mode = dev_mode
 
     async def generate(
             self, 
@@ -106,7 +112,9 @@ class ProblemGenerator:
         for attempt in range(1, self.max_attempts + 1):
             problem = None
             try:
-                problem = await self.provider.generate_problem(request=request, language=language)
+                problem = await self.provider.generate_problem(
+                    request=request, language=language, dev_mode=self.dev_mode,
+                    )
                 if not isinstance(problem.statement, str) or not problem.statement.strip():
                     raise GeneratedProblemInvalid([
                         ValidationIssue("empty_statement", "The problem statement must not be empty.")
@@ -115,7 +123,14 @@ class ProblemGenerator:
                     raise GeneratedProblemInvalid([
                         ValidationIssue("statement_too_long", "The problem statement exceeds 4000 characters.")
                         ])
-                analysis = validate_problem(problem, self.constraints)
+                has_answer = hasattr(problem, "answer")
+                has_operations = hasattr(problem, "operations")
+                if has_answer != has_operations:
+                    raise GeneratedProblemInvalid([
+                        ValidationIssue("incomplete_metadata", "Answer and operations must be supplied together.")
+                        ])
+                analysis = (validate_problem(problem, self.constraints) if has_answer
+                            else validate_expression(problem.expression, self.constraints))
                 if self.difficulty is not None and problem.difficulty != self.difficulty:
                     raise ProblemConstraintViolation([
                         ValidationIssue("difficulty_mismatch", "Declared difficulty does not match the requested level.")
@@ -125,6 +140,15 @@ class ProblemGenerator:
             except GeneratedProblemInvalid as error:
                 failure = error
             else:
+                if not has_answer:
+                    from .schemas import MathProblem
+
+                    problem = MathProblem(
+                        statement=problem.statement, expression=problem.expression,
+                        difficulty=problem.difficulty, language=language,
+                        answer=analysis.value.numerator,
+                        operations=list(dict.fromkeys(analysis.operations)),
+                        )
                 return ValidatedProblem(problem, analysis, attempt)
 
             failures.append(failure)
