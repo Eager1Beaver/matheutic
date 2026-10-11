@@ -1,8 +1,9 @@
-"""Telegram handlers for presenting validated arithmetic problems and generation fallbacks."""
+"""Telegram transport for conversational arithmetic coaching and diagnostics."""
 from __future__ import annotations
 
 import argparse
 import logging
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from ai.errors import (
@@ -14,9 +15,12 @@ from ai.errors import (
     RequestInterpretationInvalid,
     UnsupportedProblemRequest,
 )
-from ai.intent import RequestDecision, RequestInterpreter
+from ai.intent import RequestDecision
 from ai.orchestrator import GenerationRejection, ProblemGenerator, ValidatedProblem
 from ai.provider import AIProvider
+from coach import messages
+from coach.flow import Coach
+from coach.session import InMemorySessionStore
 from config.settings import ApplicationSettings
 from core.constraints import ProblemConstraints
 from core.expression import ExpressionAnalysis, ExpressionError, analyze_expression
@@ -27,7 +31,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_GEN_ATTEMPTS = 1 # 3
+MAX_GEN_ATTEMPTS = 2 # 3
 
 
 def generation_fallback(error: AIProviderError) -> str:
@@ -77,11 +81,15 @@ def generation_fallback(error: AIProviderError) -> str:
     return "I couldn't generate a problem right now. Please try again."
 
 
-def request_reply(decision: RequestDecision) -> str:
+def request_reply(decision: RequestDecision, *, active: bool = False) -> str:
     """Return an application-owned invitation or scope explanation for a routed message."""
     if decision.intent == "off_topic":
+        if active:
+            return ("Hello! " if decision.reason == "greeting" else "I'm here to help with maths practice. ") + (
+                "You can continue the current problem, ask for a hint, or request another problem."
+                )
         if decision.reason == "greeting":
-            return "Hello! Would you like to practise addition, subtraction, multiplication or division?"
+            return "Hello! Would you like to practice addition, subtraction, multiplication or division?"
         return (
             "I'm here to help with maths practice. Would you like an addition, "
             "subtraction, multiplication or division problem?"
@@ -95,17 +103,14 @@ def request_reply(decision: RequestDecision) -> str:
                 )
         if decision.reason == "invalid_instructions":
             return (
-                "Let's practise with mathematically correct problems. "
+                "Let's practice with mathematically correct problems. "
                 "Tell me which operations or number range you'd like to use."
                 )
         return generation_fallback(UnsupportedProblemRequest(reason=decision.reason))
     if decision.reason == "answer_without_problem":
-        return (
-            "Please describe the kind of arithmetic problem you'd like, "
-            "such as 'an easy addition problem with numbers below 20'."
-            )
+        return messages.NO_PROBLEM
     return (
-        "I'm not sure what you'd like to practise. Try asking: "
+        "I'm not sure what you'd like to practice. Try asking: "
         "'Give me an easy addition problem with numbers below 20.'"
         )
 
@@ -184,54 +189,87 @@ async def _send_development_data(
         await message.reply_text(details[:4000], parse_mode=None)
 
 
+def _session_key(update: Update) -> tuple[int, int]:
+    """Identify the conversation and learner for independent coach state."""
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    message = getattr(update, "effective_message", None)
+    return (getattr(chat, "id", getattr(message, "chat_id", 0)), getattr(user, "id", 0))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome a learner and invite an arithmetic request."""
+    """Reset this conversation and invite a new arithmetic request."""
     message = update.effective_message
     if message is None:
         return
-    user = update.effective_user
+    user = getattr(update, "effective_user", None)
     first_name = user.first_name if user else "there"
     await message.reply_text(
         f"Hello, {first_name}. I'm Matheutic.\n\n"
         "Describe the kind of arithmetic problem you'd like."
         )
+    if context is not None:
+        store = context.bot_data.setdefault("session_store", InMemorySessionStore())
+        store.reset(_session_key(update))
+        logger.info("Coach session reset: state=IDLE")
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route a learner message and present a verified problem or a friendly reply."""
+    """Deliver a coach reply and commit the resulting conversation state."""
     message = update.effective_message
     if message is None or not message.text:
         return
     provider = context.bot_data["ai_provider"]
     dev_mode = context.bot_data.get("dev_mode", False)
-    interpreter = RequestInterpreter(
-        provider, context.bot_data.get("problem_constraints"), dev_mode=dev_mode,
-        )
+    store = context.bot_data.setdefault("session_store", InMemorySessionStore())
+    key = _session_key(update)
+    saved = store.get(key)
+    session = deepcopy(saved)
+    coach = Coach(provider, context.bot_data.get("problem_constraints"), dev_mode=dev_mode,
+                  max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS))
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
     try:
-        decision = await interpreter.interpret(message.text)
-        logger.info("Request routed: intent=%s reason=%s", decision.intent, decision.reason)
-        if decision.intent != "generate_problem":
-            await message.reply_text(request_reply(decision))
-            return
-        generator = ProblemGenerator(
-            provider, decision.constraints, difficulty=decision.difficulty,
-            max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS),
-            dev_mode=dev_mode,
-            )
-        result = await generator.generate(
-            request=decision.generation_request, language=decision.language,
+        reply = await coach.handle(
+            session, message.text,
             on_rejection=rejections.append if rejections is not None else None,
             )
     except AIProviderError as error:
         _log_failure(error)
-        await message.reply_text(generation_fallback(error))
+        logger.info("Coach turn failed: state=%s preserved", saved.state.value)
+        fallback = (
+            "I couldn't understand that message reliably. Try an answer, ask for a hint, "
+            "or request another problem." 
+            if saved.active and isinstance(error, RequestInterpretationInvalid)
+            else generation_fallback(error)
+            )
+        await message.reply_text(fallback)
         if rejections is not None:
             await _send_development_data(message, rejections)
         return
-    await message.reply_text(result.problem.statement)
+    text = request_reply(reply.route, active=session.active) if reply.route is not None else reply.text
+    if reply.reaction is not None:
+        try:
+            await message.set_reaction(reaction=reply.reaction)
+        except Exception as error:
+            logger.warning("Acknowledgement reaction failed: category=%s", type(error).__name__)
+            text = messages.ACKNOWLEDGEMENT
+            await message.reply_text(text)
+    else:
+        await message.reply_text(text)
+    if session.run is not None:
+        session.run.remember("learner", message.text)
+        session.run.remember("coach", text or messages.ACKNOWLEDGEMENT)
+    store.save(key, session)
+    run = session.run
+    logger.info(
+        "Coach turn: intent=%s state=%s->%s attempts=%s final_attempts=%s hints_used=%s hint_level=%s step=%s outcome=%s",
+        reply.intent, saved.state.value, session.state.value,
+        run.attempts if run else 0, run.final_attempts if run else 0,
+        run.hints_used if run else 0, run.hint_level if run else 0,
+        run.step_index + 1 if run and run.step_index is not None else "final",
+        run.outcome if run else None)
     if rejections is not None:
-        await _send_development_data(message, rejections, result)
+        await _send_development_data(message, rejections, reply.generated)
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -263,12 +301,13 @@ def create_application(
         )
     from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).concurrent_updates(False).build()
     application.bot_data.update({
         "ai_provider": provider,
         "problem_constraints": generator.constraints,
         "max_generation_attempts": generator.max_attempts,
         "dev_mode": dev_mode,
+        "session_store": InMemorySessionStore(),
         })
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))

@@ -41,6 +41,10 @@ class ProblemConstraintViolation(GeneratedProblemInvalid):
     """A mathematically consistent candidate violates application constraints."""
 
 
+class HintGenerationInvalid(GeneratedProblemInvalid):
+    """Hint wording fails the structured or mathematical-content boundary."""
+
+
 class AIServiceUnavailable(AIProviderError):
     """The AI service cannot complete a generation call."""
 

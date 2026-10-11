@@ -13,15 +13,24 @@ from core.problem_validator import ValidationIssue
 from .errors import (
 	AIServiceUnavailable,
 	GeneratedProblemInvalid,
+	HintGenerationInvalid,
 	RequestInterpretationInvalid,
 )
 from .prompts import (
 	GENERATE_PROBLEM_DEV_PROMPT,
 	GENERATE_PROBLEM_PROMPT,
+	INTERPRET_COACH_TURN_PROMPT,
 	INTERPRET_REQUEST_PROMPT,
+	PHRASE_HINT_PROMPT,
 )
 from .provider import AIProvider
-from .schemas import MathProblem, ProblemContent, RequestInterpretation
+from .schemas import (
+	CoachInterpretation,
+	HintWording,
+	MathProblem,
+	ProblemContent,
+	RequestInterpretation,
+)
 
 REASONING_EFFORT = "low"  # GPT-OSS supports "low", "medium", or "high".
 
@@ -29,7 +38,7 @@ logger = logging.getLogger(__name__)
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=5)
 def _completion_schema(output_model: type[BaseModel]) -> dict:
 	"""Build a strict completion schema without automatic title annotations."""
 	def trim(node):
@@ -41,7 +50,7 @@ def _completion_schema(output_model: type[BaseModel]) -> dict:
 			key: ({name: trim(value) for name, value in item.items()}
 				  if key in {"properties", "$defs"} else trim(item))
 			for key, item in node.items() if key != "title"
-		}
+			}
 
 	return trim(output_model.model_json_schema())
 
@@ -108,6 +117,34 @@ class GroqProvider(AIProvider):
 			request, language, system_prompt=INTERPRET_REQUEST_PROMPT,
 			schema_name="request_interpretation", output_model=RequestInterpretation,
 			invalid_error=RequestInterpretationInvalid, dev_mode=dev_mode,
+			)
+
+	async def interpret_turn(
+			self, 
+			request: str, 
+			language: str = "en", 
+			*, 
+			dev_mode: bool = False,
+			) -> CoachInterpretation:
+		"""Return a structured learner action using the supplied problem context."""
+		return await self._structured_completion(
+			request, language, system_prompt=INTERPRET_COACH_TURN_PROMPT,
+			schema_name="coach_interpretation", output_model=CoachInterpretation,
+			invalid_error=RequestInterpretationInvalid, dev_mode=dev_mode,
+			)
+
+	async def phrase_hint(
+			self, 
+			request: str, 
+			language: str = "en", 
+			*, 
+			dev_mode: bool = False,
+			) -> HintWording:
+		"""Return a verbal introduction to verified mathematical guidance."""
+		return await self._structured_completion(
+			request, language, system_prompt=PHRASE_HINT_PROMPT,
+			schema_name="hint_wording", output_model=HintWording,
+			invalid_error=HintGenerationInvalid, dev_mode=dev_mode,
 			)
 
 	async def _structured_completion(
