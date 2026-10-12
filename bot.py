@@ -43,6 +43,8 @@ def generation_fallback(error: AIProviderError) -> str:
             "for example: 'Give me an easy addition problem with numbers below 20.'"
             )
     if isinstance(error, UnsupportedProblemRequest):
+        if error.reason == "unsupported_difficulty":
+            return "Choose a difficulty from 1 to 5. To go beyond level 5, ask for a harder problem while practicing at level 5."
         if error.reason == "unsupported_custom_problem":
             return "Tell me the operations, number ranges, or difficulty you want to practice, and I'll choose a problem for you. Specifying an exact calculation or fixed numbers is not supported."
         if error.reason == "unsupported_language":
@@ -204,6 +206,8 @@ def _request_details(record) -> str:
         if "interpreted" in diagnostics:
             lines.append("Interpreted requirements: " + json.dumps(diagnostics["interpreted"], ensure_ascii=False)[:950])
         lines.append("Difficulty preset: " + str(diagnostics.get("preset", "unspecified")))
+        if diagnostics.get("preferred_operations") is not None:
+            lines.append("Preferred operation count: " + str(diagnostics["preferred_operations"]))
         lines.append("Explicit preferences: " + json.dumps(diagnostics.get("explicit", {}), ensure_ascii=False)[:700])
     policy = record.constraints
     if policy is not None:
@@ -222,6 +226,7 @@ def _request_details(record) -> str:
             "Story review (model assessment): "
             f"story={review.has_story}, question={review.has_question}, "
             f"ambiguous={review.ambiguous}, consistent={review.consistent_quantities}",
+            f"Review attempts: {record.story_review_attempts}; disclosed results: {json.dumps(review.disclosed_results, ensure_ascii=False)}",
             f"Story calculation: {review.expression}",
             ])
     return "\n".join(lines)
@@ -301,12 +306,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.save(key, session)
     run = session.run
     logger.info(
-        "Coach turn: intent=%s state=%s->%s attempts=%s final_attempts=%s hints_used=%s hint_level=%s step=%s outcome=%s",
+        "Coach turn: intent=%s state=%s->%s attempts=%s final_attempts=%s hints_used=%s hint_level=%s step=%s outcome=%s pending_difficulty=%s",
         reply.intent, saved.state.value, session.state.value,
         run.attempts if run else 0, run.final_attempts if run else 0,
         run.hints_used if run else 0, run.hint_level if run else 0,
         run.step_index + 1 if run and run.step_index is not None else "final",
-        run.outcome if run else None)
+        run.outcome if run else None,
+        session.pending_difficulty.kind if session.pending_difficulty is not None else None)
     if rejections is not None:
         await _send_development_data(message, rejections, reply.generated)
 

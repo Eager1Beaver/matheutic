@@ -5,12 +5,17 @@ import json
 import re
 from dataclasses import asdict, dataclass
 
-from config.difficulty import DEFAULT_DIFFICULTY, difficulty_preset
+from config.difficulty import (
+    DEFAULT_DIFFICULTY,
+    MAX_PROGRESSIVE_DIFFICULTY,
+    practice_preset,
+)
 from core.constraints import SUPPORTED_OPERATIONS, ProblemConstraints
 from core.problem_validator import ValidationIssue
 
 from .errors import RequestInterpretationInvalid, UnsupportedProblemRequest
 from .policy import natural_number_policy
+from .request_checks import exact_operation_count, source_request_issue
 from .request_scope import custom_problem_request
 
 _ROUTE_REASONS = {
@@ -18,10 +23,12 @@ _ROUTE_REASONS = {
     "unsupported_request": {
         "unsupported_math", "unsupported_task", "impossible_constraints",
         "invalid_instructions", "unsupported_language", "unsupported_custom_problem",
+        "unsupported_difficulty",
         },
     "off_topic": {"off_topic", "greeting"},
     "clarify": {"unclear", "answer_without_problem"},
-}
+    }
+
 _GREETING = re.compile(r"(?:hi|hello|hey|good morning|good afternoon|good evening)[!.,\s]*", re.I)
 _ANSWER = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?\??")
 NUMERIC_FIELDS = (
@@ -40,16 +47,29 @@ class RequestDecision:
     language: str = "en"
     diagnostics: dict | None = None
     preferences: dict | None = None
+    difficulty_change: int = 0
 
 
 def _resolve(spec, previous: dict | None):
     fields = spec.model_dump() if hasattr(spec, "model_dump") else vars(spec).copy()
     fields["required_operations"] = fields["required_operations"] or []
     fields["clear_limits"] = fields["clear_limits"] or []
-    inherited = previous if fields["inherit_previous"] and previous else {}
+    relative = fields["inherit_previous"] or (fields["difficulty"] is None and fields["difficulty_change"] != 0)
+    inherited = previous if relative and previous else {}
     preferences = dict(inherited.get("preferences", {}))
     level = fields["difficulty"] if fields["difficulty"] is not None else inherited.get("difficulty", DEFAULT_DIFFICULTY)
-    level = max(1, min(5, level + fields["difficulty_change"]))
+    level = max(1, min(MAX_PROGRESSIVE_DIFFICULTY, level + fields["difficulty_change"]))
+    if (
+        fields["difficulty_change"] 
+        or (fields["difficulty"] is not None 
+            and inherited and fields["difficulty"] != inherited.get("difficulty")
+            )
+            ):
+        reset = NUMERIC_FIELDS + ("clear_limits",)
+        if fields["difficulty_change"] >= 0:
+            reset += ("allowed_operations", "required_operations")
+        for name in reset:
+            preferences.pop(name, None)
     for name in NUMERIC_FIELDS + ("allowed_operations", "theme", "style"):
         value = fields[name]
         if value is not None and value != "":
@@ -62,7 +82,8 @@ def _resolve(spec, previous: dict | None):
     for name in fields["clear_limits"]:
         preferences.pop(name, None)
     preferences["clear_limits"] = sorted(cleared)
-    defaults = asdict(difficulty_preset(level))
+    defaults = asdict(practice_preset(level))
+    defaults.pop("preferred_operations")
     custom_scale = (
         any(name in preferences for name in ("min_operand", "max_operand"))
         or preferences.get("min_operations", defaults["min_operations"]) > defaults["max_operations"]
@@ -119,15 +140,25 @@ def _policy(values: dict, base: ProblemConstraints) -> ProblemConstraints:
         raise UnsupportedProblemRequest(reason="impossible_constraints") from error
 
 
-def compile_decision(interpretation, base: ProblemConstraints, *, source_text: str | None = None,
-                     previous_request: dict | None = None) -> RequestDecision:
+def compile_decision(
+        interpretation, 
+        base: ProblemConstraints, 
+        *, 
+        source_text: str | None = None,
+        previous_request: dict | None = None,
+        ) -> RequestDecision:
     """Resolve relative preferences and produce a reproducible arithmetic policy."""
     if (interpretation.intent not in _ROUTE_REASONS
             or interpretation.reason not in _ROUTE_REASONS[interpretation.intent]
             or ((interpretation.intent == "generate_problem") != (interpretation.problem_request is not None))):
         raise RequestInterpretationInvalid([ValidationIssue("inconsistent_route", "The interpreter returned an inconsistent routing decision.")])
+    if source_text and (issue := source_request_issue(source_text)):
+        return RequestDecision("unsupported_request", issue)
     if interpretation.intent != "generate_problem":
-        return RequestDecision(interpretation.intent, interpretation.reason)
+        reason = interpretation.reason
+        if reason == "greeting" and source_text and not _GREETING.fullmatch(source_text.strip()):
+            reason = "off_topic"
+        return RequestDecision(interpretation.intent, reason)
     if source_text and custom_problem_request(source_text):
         return RequestDecision("unsupported_request", "unsupported_custom_problem")
     spec = interpretation.problem_request
@@ -135,6 +166,12 @@ def compile_decision(interpretation, base: ProblemConstraints, *, source_text: s
     # and an error will be raised specifying supported language
     if spec.language != "en":
         return RequestDecision("unsupported_request", "unsupported_language")
+    if source_text and (count := exact_operation_count(source_text)) is not None:
+        from .schemas import ProblemRequest
+        fields = spec.model_dump() if hasattr(spec, "model_dump") else vars(spec)
+        if not 1 <= count <= base.max_operations:
+            return RequestDecision("unsupported_request", "impossible_constraints")
+        spec = ProblemRequest.model_validate(fields | {"min_operations": count, "max_operations": count})
     if spec.unresolved:
         return RequestDecision("clarify", "unclear")
     fields, preferences, level, values = _resolve(spec, previous_request)
@@ -143,12 +180,51 @@ def compile_decision(interpretation, base: ProblemConstraints, *, source_text: s
     except UnsupportedProblemRequest as error:
         return RequestDecision("unsupported_request", error.reason)
     effective = asdict(policy)
-    payload = {"constraints": effective, "difficulty": level,
-               "theme": preferences.get("theme", ""), "style": preferences.get("style", "")}
-    diagnostics = {"interpreted": fields, "explicit": preferences, "effective": effective,
-                   "preset": level}
-    return RequestDecision("generate_problem", "none", json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-                           policy, level, spec.language, diagnostics, preferences)
+    payload = {
+        "constraints": effective, 
+        "difficulty": level,
+        "theme": preferences.get("theme", ""), 
+        "style": preferences.get("style", ""),
+        }
+    diagnostics = {
+        "interpreted": fields, 
+        "explicit": preferences, 
+        "effective": effective,
+        "preset": level, 
+        "preferred_operations": practice_preset(level).preferred_operations,
+        }
+    return RequestDecision(
+        "generate_problem", 
+        "none", 
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        policy, level, spec.language, 
+        diagnostics, 
+        preferences, 
+        spec.difficulty_change,
+        )
+
+
+def change_operators(
+        request: RequestDecision, 
+        base: ProblemConstraints, 
+        allowed, 
+        required,
+        ) -> RequestDecision:
+    """Compile a retained target level with a learner's confirmed operator selection."""
+    from .schemas import ProblemRequest, RequestInterpretation
+    spec = ProblemRequest(
+        **{name: None for name in NUMERIC_FIELDS}, 
+        allowed_operations=list(allowed),
+        required_operations=list(required), 
+        difficulty=None, difficulty_change=0, inherit_previous=True,
+        unresolved=False, clear_limits=[], 
+        language=request.language, theme=None, style=None,
+        )
+    return compile_decision(
+        RequestInterpretation(
+            intent="generate_problem", reason="none", problem_request=spec),
+            base, 
+            previous_request={"difficulty": request.difficulty, "preferences": request.preferences})
 
 
 class RequestInterpreter:
@@ -168,5 +244,7 @@ class RequestInterpreter:
             return RequestDecision("off_topic", "greeting")
         if _ANSWER.fullmatch(text):
             return RequestDecision("clarify", "answer_without_problem")
+        if issue := source_request_issue(text):
+            return RequestDecision("unsupported_request", issue)
         interpretation = await self.provider.interpret_request(request=text, language="en", dev_mode=self.dev_mode)
         return compile_decision(interpretation, self.constraints, source_text=text)

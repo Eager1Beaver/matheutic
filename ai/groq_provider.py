@@ -192,7 +192,18 @@ class GroqProvider(AIProvider):
 			except RequestInterpretationInvalid:
 				if attempt + 1 == attempts:
 					raise
-				logger.warning("Retrying invalid interpretation: phase=%s attempt=%s/%s", kwargs["schema_name"], attempt + 2, attempts)
+				logger.warning(
+					"Retrying invalid interpretation: phase=%s attempt=%s/%s", 
+					kwargs["schema_name"], 
+					attempt + 2, 
+					attempts,
+					)
+				kwargs = dict(kwargs)
+				kwargs["system_prompt"] += (
+					"\nReturn the exact nested schema. Keep all generation preferences inside problem_request; "
+					"never place difficulty, operators, limits, theme, or style at the top level. "
+					"Include every required field, using null for unspecified nullable fields."
+					)
 
 	async def _completion_once(
 			self, 
@@ -302,6 +313,14 @@ class GroqProvider(AIProvider):
 		except ValidationError as exc:
 			# Error types are useful diagnostics; Pydantic input values can contain private text.
 			error_types = sorted({error["type"] for error in exc.errors(include_input=False)})
+			if dev_mode:
+				known = _schema_field_names(_completion_schema(output_model))
+				paths = [
+					{"path": ".".join(str(part) if isinstance(part, int) or part in known else "<nested>"
+					                  for part in error["loc"]), 
+									  "type": error["type"]}
+				         for error in exc.errors(include_input=False)[:10]]
+				logger.warning("LLM validation failed: phase=%s validation=%s", schema_name, paths)
 			raise invalid_error([
 				ValidationIssue("invalid_schema", "Structured output validation failed: " + ", ".join(error_types))
 				]) from exc

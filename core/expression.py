@@ -40,8 +40,8 @@ class ExpressionAnalysis:
 _OPERATOR_SYMBOLS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 
 
-def expression_structure(expression: str, *, commutative: bool = False) -> tuple:
-    """Return a checked arithmetic tree, optionally ignoring commutative order."""
+def expression_structure(expression: str, *, commutative: bool = False, associative: bool = False) -> tuple:
+    """Return a checked tree, optionally normalizing addition/multiplication grouping."""
     analyze_expression(expression)
 
     def structure(node: ast.AST) -> tuple:
@@ -49,6 +49,11 @@ def expression_structure(expression: str, *, commutative: bool = False) -> tuple
             return ("number", node.value)
         left, right = structure(node.left), structure(node.right)
         operator = _OPERATOR_SYMBOLS[type(node.op)]
+        if associative and operator in {"+", "*"}:
+            terms = []
+            for child in (left, right):
+                terms.extend(child[1] if child[0] == operator else (child,))
+            return (operator, tuple(sorted(terms) if commutative else terms))
         if commutative and operator in {"+", "*"}:
             left, right = sorted((left, right))
         return (operator, left, right)

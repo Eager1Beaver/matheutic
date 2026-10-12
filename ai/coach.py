@@ -16,6 +16,7 @@ from .errors import RequestInterpretationInvalid
 from .intent import RequestDecision, compile_decision
 from .policy import natural_number_policy
 from .provider import AIProvider
+from .request_checks import source_request_issue
 
 # TODO: explore spacy / NLTK, 
 # such hardcoded actions are not very practical on a bigger scale
@@ -48,9 +49,19 @@ def session_context(session: CoachSession) -> dict:
     """Build a bounded context without the expected numerical answer."""
     payload = {"state": session.state.value, "active_problem": session.active}
     if session.repeat_request is not None:
-        payload["previous_request"] = {"preferences": session.repeat_request.preferences or {},
-                                       "difficulty": session.repeat_request.difficulty}
+        payload["previous_request"] = {
+            "preferences": session.repeat_request.preferences or {},
+            "difficulty": session.repeat_request.difficulty,
+            }
         payload["previous_request"]["language"] = session.language
+    if session.pending_difficulty is not None:
+        pending = session.pending_difficulty
+        payload["pending_difficulty"] = {
+            "choice": pending.kind, 
+            "target_level": pending.request.difficulty,
+            "same_operators": pending.same_operations,
+            "next_operators": pending.request.constraints.allowed_operations,
+            }
     if session.run is not None:
         run = session.run
         payload["statement"] = run.validated.problem.statement
@@ -86,6 +97,31 @@ class CoachInterpreter:
                 return CoachDecision(intent)
         if _GREETING.fullmatch(text):
             return CoachDecision("off_topic", "greeting")
+        if issue := source_request_issue(text):
+            return CoachDecision("unsupported_request", issue)
+
+        relative = re.fullmatch(r"(?:(?:another(?: one| problem)?|next(?: problem)?)[, ]+(?:but )?)?(harder|easier)(?: please)?", normalized)
+        if relative:
+            from .intent import NUMERIC_FIELDS
+            from .schemas import ProblemRequest, RequestInterpretation
+            spec = ProblemRequest(
+                **{name: None for name in NUMERIC_FIELDS}, 
+                allowed_operations=None, required_operations=[],
+                difficulty=None, difficulty_change=1 if relative.group(1) == "harder" else -1,
+                inherit_previous=session.repeat_request is not None, unresolved=False, 
+                clear_limits=[],
+                language=session.language, theme=None, style=None,
+                )
+            request = compile_decision(
+                RequestInterpretation(
+                    intent="generate_problem", 
+                    reason="none", 
+                    problem_request=spec
+                    ),
+                    self.constraints, 
+                    previous_request=session_context(session).get("previous_request"),
+                    )
+            return CoachDecision(request.intent, request.reason, request=request)
 
         from pydantic import ValidationError
 
@@ -108,13 +144,28 @@ class CoachInterpreter:
                 return CoachDecision("clarify", "unclear")
             return CoachDecision("answer", value=value, final_answer=interpretation.answer_target == "final")
         if interpretation.intent in {"generate_problem", "unsupported_request", "off_topic", "clarify"}:
-            request = compile_decision(RequestInterpretation(
-                intent=interpretation.intent, reason=interpretation.reason,
-                problem_request=interpretation.problem_request,
-            ), self.constraints, source_text=text,
-                previous_request=session_context(session).get("previous_request"))
+            previous = session_context(session).get("previous_request")
+            if interpretation.intent == "generate_problem" and session.pending_difficulty is not None:
+                spec = interpretation.problem_request
+                if spec.difficulty is None and spec.difficulty_change == 0:
+                    pending = session.pending_difficulty.request
+                    previous = {"difficulty": pending.difficulty, "preferences": pending.preferences or {}}
+                    interpretation = interpretation.model_copy(update={"problem_request": spec.model_copy(update={"inherit_previous": True})})
+            request = compile_decision(
+                RequestInterpretation(
+                    intent=interpretation.intent, 
+                    reason=interpretation.reason,
+                    problem_request=interpretation.problem_request,
+                    ), 
+                    self.constraints, 
+                    source_text=text,
+                    previous_request=previous,
+                    )
             if self.dev_mode and request.constraints is not None:
-                logger.info("Compiled arithmetic request: constraints=%s explicit_fields=%s",
-                            request.constraints, list(request.preferences or {}))
+                logger.info(
+                    "Compiled arithmetic request: constraints=%s explicit_fields=%s",
+                    request.constraints, 
+                    list(request.preferences or {}),
+                    )
             return CoachDecision(request.intent, request.reason, request=request)
         return CoachDecision(interpretation.intent)

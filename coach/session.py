@@ -53,12 +53,22 @@ class ProblemRun:
 
 
 @dataclass
+class DifficultyChoice:
+    """Retain a target request while confirming operators or custom limits."""
+    request: RequestDecision
+    kind: str
+    same_operations: tuple[str, ...] | None = None
+    same_required: tuple[str, ...] = ()
+
+
+@dataclass
 class CoachSession:
     state: CoachState = CoachState.IDLE
     run: ProblemRun | None = None
     repeat_request: RequestDecision | None = None
     difficulty: int | None = None
     language: str = "en"
+    pending_difficulty: DifficultyChoice | None = None
 
     @property
     def active(self) -> bool:

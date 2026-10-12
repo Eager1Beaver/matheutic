@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from config.difficulty import MAX_PROGRESSIVE_DIFFICULTY
 from core.constraints import ProblemConstraints
-from core.expression import ExpressionAnalysis, expression_structure
+from core.expression import (
+    ExpressionAnalysis,
+    ExpressionError,
+    analyze_expression,
+    expression_structure,
+)
 from core.problem_validator import (
     ProblemValidationError,
     ValidationIssue,
@@ -48,6 +55,7 @@ class ValidatedProblem:
     constraints: ProblemConstraints | None = None
     request_diagnostics: dict | None = None
     story_review: StoryReview | None = None
+    story_review_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,7 @@ class GenerationRejection:
     constraints: ProblemConstraints | None = None
     request_diagnostics: dict | None = None
     story_review: StoryReview | None = None
+    story_review_attempts: int = 0
 
 
 def classify_validation_error(error: ProblemValidationError) -> GeneratedProblemInvalid:
@@ -87,8 +96,9 @@ class ProblemGenerator:
             raise TypeError("constraints must be ProblemConstraints")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 5:
             raise ValueError("max_attempts must be an integer from 1 to 5")
-        if difficulty is not None and (type(difficulty) is not int or not 1 <= difficulty <= 5):
-            raise ValueError("difficulty must be an integer from 1 to 5")
+        maximum_difficulty = MAX_PROGRESSIVE_DIFFICULTY if calculation is not None else 5
+        if difficulty is not None and (type(difficulty) is not int or not 1 <= difficulty <= maximum_difficulty):
+            raise ValueError("difficulty exceeds the supported generation range")
         if type(dev_mode) is not bool:
             raise ValueError("dev_mode must be a boolean")
         if type(review_story) is not bool:
@@ -102,24 +112,28 @@ class ProblemGenerator:
         self.request_diagnostics = request_diagnostics
         self.calculation = calculation
 
-    async def _review_story(self, problem, language: str):
+    async def _review_story(self, problem, language: str, repair: str | None = None):
         """Read and validate the provider's independent story review output."""
         from pydantic import ValidationError
 
         from .schemas import StoryReview
 
-        review = await self.provider.review_story(
-            request=json.dumps({"statement": problem.statement}, ensure_ascii=False, separators=(",", ":")),
-            language=language, dev_mode=self.dev_mode,
-        )
+        payload = {"statement": problem.statement}
+        if repair is not None:
+            payload["review_repair"] = repair
         try:
+            review = await self.provider.review_story(
+                request=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                language=language, 
+                dev_mode=self.dev_mode,
+                )
             return StoryReview.model_validate(review.model_dump() if isinstance(review, StoryReview) else review)
-        except ValidationError as error:
+        except (ValidationError, GeneratedProblemInvalid) as error:
             raise GeneratedProblemInvalid([
                 ValidationIssue("invalid_story_review", "The provider returned an invalid story review.")
             ]) from error
 
-    def _validate_story(self, review, expression: str) -> None:
+    def _validate_story(self, review, expression: str, statement: str = "") -> None:
         issues = []
         for rejected, code, message in (
             (not review.has_story, "not_story", "The statement is a bare calculation rather than a story."),
@@ -129,21 +143,40 @@ class ProblemGenerator:
         ):
             if rejected:
                 issues.append(ValidationIssue(code, message))
+        if review.disclosed_results:
+            if any(not quote.strip() or len(quote) > 400 or quote not in statement for quote in review.disclosed_results):
+                issues.append(ValidationIssue("invalid_story_review", "A disclosure quote is not grounded in the story."))
+            else:
+                issues.append(ValidationIssue("story_solution_disclosed", "The story discloses a computed intermediate or final result."))
         if review.expression is None:
             issues.append(ValidationIssue("missing_story_expression", "The story's calculation could not be reconstructed."))
         else:
             try:
-                validate_expression(review.expression, self.constraints)
+                validate_expression(review.expression, natural_number_policy())
                 matches = (
-                    expression_structure(review.expression, commutative=True)
-                    == expression_structure(expression, commutative=True)
+                    expression_structure(review.expression, commutative=True, associative=True)
+                    == expression_structure(expression, commutative=True, associative=True)
                     )
-            except ProblemValidationError:
-                matches = False
-            if not matches:
-                issues.append(ValidationIssue("story_expression_mismatch", "The independently reconstructed calculation disagrees with the candidate."))
+            except (ProblemValidationError, ExpressionError) as error:
+                code = error.issues[0].code if isinstance(error, ProblemValidationError) else error.code
+                issues.append(ValidationIssue("invalid_story_review_expression", f"The reconstructed expression is invalid ({code})."))
+            else:
+                if not matches:
+                    issues.append(ValidationIssue("story_expression_mismatch", "The independently reconstructed calculation disagrees with the candidate."))
         if issues:
             raise GeneratedProblemInvalid(issues)
+
+    @staticmethod
+    def _repairable_review(error, review, expression: str) -> bool:
+        """Identify malformed or prematurely simplified independent reconstructions."""
+        codes = {issue.code for issue in error.issues}
+        if codes <= {"invalid_story_review", "invalid_story_review_expression", "missing_story_expression"}:
+            return True
+        if codes != {"story_expression_mismatch"} or review is None or review.expression is None:
+            return False
+        expected, reconstructed = analyze_expression(expression), analyze_expression(review.expression)
+        return (len(reconstructed.operations) < len(expected.operations)
+                or Counter(reconstructed.operands) < Counter(expected.operands))
 
     async def generate(
             self, 
@@ -172,6 +205,7 @@ class ProblemGenerator:
         for attempt in range(1, self.max_attempts + 1):
             problem = None
             review = None
+            review_attempts = 0
             try:
                 if self.calculation is None:
                     problem = await self.provider.generate_problem(request=request, language=language, dev_mode=self.dev_mode)
@@ -213,9 +247,28 @@ class ProblemGenerator:
                     raise ProblemConstraintViolation([
                         ValidationIssue("difficulty_mismatch", "Declared difficulty does not match the requested level.")
                         ])
+                if self.calculation is None and getattr(problem, "difficulty", 1) > 5:
+                    raise ProblemConstraintViolation([
+                        ValidationIssue("difficulty_mismatch", "Ordinary model generation supports difficulty levels 1 through 5.")
+                        ])
                 if self.review_story:
-                    review = await self._review_story(problem, language)
-                    self._validate_story(review, problem.expression)
+                    repair = None
+                    for review_attempts in (1, 2):
+                        try:
+                            review = None
+                            review = await self._review_story(problem, language, repair)
+                            self._validate_story(review, problem.expression, problem.statement)
+                        except GeneratedProblemInvalid as error:
+                            if review_attempts == 2 or not self._repairable_review(error, review, problem.expression):
+                                raise
+                            logger.warning("Repairing story review: issues=%s", ",".join(issue.code for issue in error.issues))
+                            repair = (
+                                "Return expression-only arithmetic, without an equals sign or answer. "
+                                "Reread the story without simplifying any original quantities or operations, "
+                                "including zero and one. Ground disclosure quotes in the statement."
+                                )
+                        else:
+                            break
             except ProblemValidationError as error:
                 failure = classify_validation_error(error)
             except GeneratedProblemInvalid as error:
@@ -230,7 +283,7 @@ class ProblemGenerator:
                         answer=analysis.value.numerator,
                         operations=list(dict.fromkeys(analysis.operations)),
                         )
-                return ValidatedProblem(problem, analysis, attempt, self.constraints, self.request_diagnostics, review)
+                return ValidatedProblem(problem, analysis, attempt, self.constraints, self.request_diagnostics, review, review_attempts)
 
             failures.append(failure)
             feedback = {
@@ -248,7 +301,11 @@ class ProblemGenerator:
                 "; ".join(f"{issue.code}: {issue.message}" for issue in failure.issues),
                 )
             if on_rejection is not None:
-                on_rejection(GenerationRejection(attempt, failure, problem, self.constraints, self.request_diagnostics, review))
+                on_rejection(GenerationRejection(
+                    attempt, failure, problem, 
+                    self.constraints, self.request_diagnostics, 
+                    review, review_attempts),
+                    )
 
         raise GenerationExhausted(failures) from failures[-1]
 

@@ -5,9 +5,15 @@ from dataclasses import dataclass
 
 from ai.coach import CoachDecision, CoachInterpreter
 from ai.errors import GenerationExhausted
-from ai.intent import RequestDecision, compile_decision
+from ai.intent import (
+    NUMERIC_FIELDS,
+    RequestDecision,
+    change_operators,
+    compile_decision,
+)
 from ai.orchestrator import GenerationRejection, ProblemGenerator, ValidatedProblem
 from ai.provider import AIProvider
+from config.difficulty import MAX_PROGRESSIVE_DIFFICULTY, practice_preset
 from core.constraints import ProblemConstraints
 
 from . import messages
@@ -16,6 +22,7 @@ from .session import (
     AnswerAttempt,
     CoachSession,
     CoachState,
+    DifficultyChoice,
     ProblemRun,
 )
 
@@ -48,11 +55,37 @@ class Coach:
 
     async def handle(self, session: CoachSession, text: str, *, on_rejection=None) -> CoachReply:
         """Interpret a turn and update state for a reply awaiting delivery."""
+        pending_reply = await self._pending_choice(session, text, on_rejection)
+        if pending_reply is not None:
+            return pending_reply
         decision = await self.interpreter.interpret(text, session)
         intent = decision.intent
+        if session.pending_difficulty is not None and intent in {"continue", "decline"}:
+            return await self._pending_choice(session, "yes" if intent == "continue" else "no", on_rejection)
         if intent in {"generate_problem", "repeat_problem"}:
+            if (
+                decision.request is not None 
+                and decision.request.difficulty_change > 0
+                and session.repeat_request is not None
+                ):
+                return await self._harder(session, decision.request, on_rejection)
+            pending = session.pending_difficulty
+            if (
+                pending is not None 
+                and decision.request is not None
+                and decision.request.difficulty == pending.request.difficulty
+                and decision.request.diagnostics["interpreted"]["allowed_operations"] is None
+                ):
+                choice = DifficultyChoice(
+                    decision.request, 
+                    "operators", 
+                    pending.same_operations, 
+                    pending.same_required,
+                    )
+                return await self._advance_choice(session, choice, on_rejection)
             return await self._generate(session, decision, on_rejection)
         if intent == "answer":
+            session.pending_difficulty = None
             return self._answer(session, decision)
         if intent == "continue":
             if session.state == CoachState.OFFERING_HINT:
@@ -69,17 +102,20 @@ class Coach:
                 return CoachReply(intent, reaction="👍")
             return CoachReply(intent, messages.UNCLEAR if session.active else messages.ACKNOWLEDGEMENT)
         if intent == "stop":
+            session.pending_difficulty = None
             if session.active:
                 session.run.outcome = "stopped"
             session.state = CoachState.IDLE
             return CoachReply(intent, reaction="👍")
         if intent == "give_up":
+            session.pending_difficulty = None
             if not session.active:
                 return CoachReply(intent, messages.NO_PROBLEM)
             session.run.outcome = "revealed"
             session.state = CoachState.PROBLEM_COMPLETE
             return CoachReply(intent, f"{solution_text(session.run)}\n\n{messages.NEXT_PROBLEM}")
         if intent in {"request_hint", "repeat_hint", "explain"}:
+            session.pending_difficulty = None
             if intent == "explain" and session.state == CoachState.PROBLEM_COMPLETE:
                 return CoachReply(intent, solution_text(session.run))
             return await self._hint(session, intent, question=text if intent == "explain" else "")
@@ -87,6 +123,108 @@ class Coach:
         if intent == "clarify" and session.active:
             return CoachReply(intent, messages.UNCLEAR)
         return CoachReply(intent, route=route)
+
+    async def _harder(self, session: CoachSession, request: RequestDecision, on_rejection) -> CoachReply:
+        """Confirm continuation choices while keeping the delivered exercise available."""
+        if session.difficulty == MAX_PROGRESSIVE_DIFFICULTY:
+            return CoachReply(
+                "clarify", 
+                "You've reached the largest automatic number range. You can specify custom limits or request another problem.",
+                )
+        previous = session.repeat_request.preferences or {}
+        explicit = request.diagnostics["interpreted"]
+        same = None
+        if (
+            explicit["allowed_operations"] is None 
+            and not explicit["required_operations"]
+            and ("allowed_operations" in previous or previous.get("required_operations"))
+            ):
+            same = session.repeat_request.constraints.allowed_operations
+            if set(same) == set(request.constraints.allowed_operations):
+                request = change_operators(request, self.interpreter.constraints, same, previous.get("required_operations", ()))
+                same = None
+        choice = DifficultyChoice(
+            request, 
+            "operators", 
+            same, 
+            tuple(previous.get("required_operations", ())),
+            )
+        if session.difficulty == 5 and not any(explicit[name] is not None for name in NUMERIC_FIELDS):
+            choice.kind = "limits"
+            session.pending_difficulty = choice
+            policy = session.repeat_request.constraints
+            next_maximum = practice_preset(request.difficulty).max_operand
+            def result_range(lower, upper):
+                return f"{lower or 0}..{upper}" if upper is not None else f"{lower or 0} or higher"
+            return CoachReply(
+                "clarify", 
+                (
+                    f"You're at difficulty 5: operands {policy.min_operand}..{policy.max_operand}, "
+                    f"intermediate results {result_range(policy.min_intermediate_value, policy.max_intermediate_value)}, "
+                    f"final answers {result_range(policy.min_final_value, policy.max_final_value)}, "
+                    f"and {policy.min_operations}..{policy.max_operations} operations. "
+                    "Would you like to specify custom limits? Send your limits or reply 'yes'. "
+                    f"Reply 'no' to increase the default maximum values to {next_maximum}, keeping four operations."
+                    ),
+                    )
+        return await self._advance_choice(session, choice, on_rejection)
+
+    async def _advance_choice(self, session: CoachSession, choice: DifficultyChoice, on_rejection) -> CoachReply:
+        """Ask about a changed operator set or generate the confirmed target request."""
+        if choice.same_operations is not None and set(choice.same_operations) != set(choice.request.constraints.allowed_operations):
+            choice.kind = "operators"
+            session.pending_difficulty = choice
+            names = {"+": "addition", "-": "subtraction", "*": "multiplication", "/": "division"}
+            same = ", ".join(names[op] for op in choice.same_operations)
+            following = ", ".join(names[op] for op in choice.request.constraints.allowed_operations)
+            return CoachReply(
+                "clarify", 
+                (
+                    f"For difficulty {choice.request.difficulty}, would you like to keep {same}, "
+                    f"or use the next level's operators ({following})? "
+                    "Reply 'same operators' (or 'yes') to keep them, or 'next level operators' (or 'no') to change. "
+                    "I'll use the selected number ranges and operation count."
+                    ),
+                    )
+        return await self._generate(session, CoachDecision("generate_problem", request=choice.request), on_rejection)
+
+    async def _pending_choice(self, session: CoachSession, text: str, on_rejection) -> CoachReply | None:
+        """Resolve simple difficulty choices locally before ordinary hint or answer actions."""
+        choice = session.pending_difficulty
+        if choice is None:
+            return None
+        normalized = " ".join(text.lower().rstrip("!?.").split())
+        yes = normalized in {"yes", "yes please", "sure", "yep", "yeah"}
+        no = normalized in {"no", "no thanks", "no thank you", "nope", "i don't want to specify limits", "use default limits", "default limits"}
+        if normalized in {"cancel", "cancel that", "never mind", "nevermind"}:
+            session.pending_difficulty = None
+            return CoachReply(
+                "decline", 
+                "Okay. You can continue the current problem or request another one." if session.active else messages.ACKNOWLEDGEMENT,
+                )
+        if choice.kind in {"limits", "custom_limits"}:
+            if yes:
+                choice.kind = "custom_limits"
+                return CoachReply(
+                    "clarify", 
+                    "Tell me the operand, intermediate, and final answer ranges or number of operations you'd like. Whole numbers and exact division still apply.",
+                    )
+            if no:
+                return await self._advance_choice(session, choice, on_rejection)
+        elif choice.kind == "operators":
+            keep = yes or normalized in {"same", "same operators", "keep the same operators", "keep them"}
+            use_preset = no or normalized in {"next level operators", "default operators", "use the defaults", "use next level operators"}
+            if keep or use_preset:
+                request = choice.request
+                if keep:
+                    request = change_operators(
+                        request, 
+                        self.interpreter.constraints, 
+                        choice.same_operations, 
+                        choice.same_required,
+                        )
+                return await self._generate(session, CoachDecision("generate_problem", request=request), on_rejection)
+        return None
 
     async def _generate(self, session: CoachSession, decision: CoachDecision, on_rejection) -> CoachReply:
         """Generate a replacement before changing the current problem record."""
@@ -109,7 +247,13 @@ class Coach:
             return CoachReply(decision.intent, route=request)
         from coach.calculations import select_calculation
         try:
-            plan = (self.calculation_selector or select_calculation)(request.constraints)
+            plan = (
+                self.calculation_selector(request.constraints) 
+                if self.calculation_selector is not None
+                else select_calculation(
+                    request.constraints,
+                    preferred_operations=practice_preset(request.difficulty).preferred_operations),
+                    )
         except GenerationExhausted as error:
             if on_rejection is not None:
                 on_rejection(GenerationRejection(
@@ -137,6 +281,7 @@ class Coach:
         session.difficulty = getattr(result.problem, "difficulty", request.difficulty)
         session.language = request.language
         session.repeat_request = request
+        session.pending_difficulty = None
         return CoachReply(decision.intent, result.problem.statement, generated=result)
 
     def _answer(self, session: CoachSession, decision: CoachDecision) -> CoachReply:

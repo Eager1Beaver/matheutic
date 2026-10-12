@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from config.difficulty import MAX_PROGRESSIVE_DIFFICULTY
 from core.expression import (
     MAX_EXPRESSION_LENGTH,
     MAX_OPERAND_VALUE,
@@ -15,7 +16,7 @@ RequestIntent = Literal["generate_problem", "unsupported_request", "off_topic", 
 RequestReason = Literal[
     "none", "unsupported_math", "unsupported_language", "unsupported_task",
     "impossible_constraints", "invalid_instructions", "off_topic", "greeting",
-    "unclear", "answer_without_problem", "unsupported_custom_problem",
+    "unclear", "answer_without_problem", "unsupported_custom_problem", "unsupported_difficulty",
     ]
 
 
@@ -66,11 +67,14 @@ class RequestInterpretation(BaseModel):
         """Require an arithmetic request only for a valid generation route."""
         valid_reasons = {
             "generate_problem": {"none"},
-            "unsupported_request": {"unsupported_math", "unsupported_language", "unsupported_task",
-                                    "impossible_constraints", "invalid_instructions", "unsupported_custom_problem"},
+            "unsupported_request": {
+                "unsupported_math", "unsupported_language", "unsupported_task",
+                "impossible_constraints", "invalid_instructions", "unsupported_custom_problem", 
+                "unsupported_difficulty",
+                },
             "off_topic": {"off_topic", "greeting"},
             "clarify": {"unclear", "answer_without_problem"},
-        }
+            }
         if self.reason not in valid_reasons[self.intent]:
             raise ValueError("Intent and reason disagree")
         if (self.intent == "generate_problem") != (self.problem_request is not None):
@@ -134,6 +138,11 @@ class StoryReview(BaseModel):
     has_question: bool
     ambiguous: bool
     consistent_quantities: bool
+    disclosed_results: list[str] = Field(
+        max_length=8, 
+        description="Exact quotes disclosing computed intermediate or final answers; [] when none. " \
+        "Original input quantities are not disclosures."
+        )
     expression: str | None = Field(max_length=MAX_EXPRESSION_LENGTH)
 
 
@@ -156,13 +165,18 @@ class ProblemContent(BaseModel):
     difficulty: int = Field(
         ge=1,
         le=5,
-        description="Difficulty from 1 (very easy) to 5 (hardest)."
+        description="Standard difficulty from 1 (very easy) to 5 (hard)."
         )
 
 
 class MathProblem(ProblemContent):
     """An arithmetic problem with answer, operators, and content language."""
 
+    difficulty: int = Field(
+        ge=1, 
+        le=MAX_PROGRESSIVE_DIFFICULTY,
+        description="Practice level; above five requires contextual harder progression.",
+        )
     answer: int = Field(description="The correct integer answer.")
     operations: list[Operation] = Field(description="Each distinct used operator, listed once.")
     language: LanguageCode = Field(
