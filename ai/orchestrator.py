@@ -1,31 +1,32 @@
 """Bounded generation and deterministic validation of arithmetic problems."""
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from core.constraints import ProblemConstraints
-from core.expression import ExpressionAnalysis
+from core.expression import ExpressionAnalysis, expression_structure
 from core.problem_validator import (
     ProblemValidationError,
     ValidationIssue,
     validate_expression,
     validate_problem,
-    )
+)
 
 from .errors import (
     GeneratedProblemInvalid,
     GenerationExhausted,
     ProblemConstraintViolation,
     UnsupportedProblemRequest,
-    )
+)
 from .policy import natural_number_policy
 from .provider import AIProvider
 
 if TYPE_CHECKING:
-    from .schemas import MathProblem, ProblemContent
+    from .schemas import MathProblem, ProblemContent, StoryReview
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ _CONSTRAINT_CODES = frozenset({
     "operand_out_of_range", "non_integer_division", "final_negative",
     "intermediate_negative", "intermediate_too_large", "final_too_large",
     "difficulty_mismatch",
+    "required_expression_mismatch", "fixed_operands_mismatch",
     })
 
 
@@ -43,6 +45,9 @@ class ValidatedProblem:
     problem: MathProblem
     analysis: ExpressionAnalysis
     attempts: int
+    constraints: ProblemConstraints | None = None
+    request_diagnostics: dict | None = None
+    story_review: StoryReview | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,9 @@ class GenerationRejection:
     attempt: int
     error: GeneratedProblemInvalid
     problem: ProblemContent | MathProblem | None = None
+    constraints: ProblemConstraints | None = None
+    request_diagnostics: dict | None = None
+    story_review: StoryReview | None = None
 
 
 def classify_validation_error(error: ProblemValidationError) -> GeneratedProblemInvalid:
@@ -71,6 +79,8 @@ class ProblemGenerator:
             max_attempts: int = 3, 
             difficulty: int | None = None,
             dev_mode: bool = False,
+            review_story: bool = False,
+            request_diagnostics: dict | None = None,
             ) -> None:
         if constraints is not None and not isinstance(constraints, ProblemConstraints):
             raise TypeError("constraints must be ProblemConstraints")
@@ -80,11 +90,58 @@ class ProblemGenerator:
             raise ValueError("difficulty must be an integer from 1 to 5")
         if type(dev_mode) is not bool:
             raise ValueError("dev_mode must be a boolean")
+        if type(review_story) is not bool:
+            raise ValueError("review_story must be a boolean")
         self.provider = provider
         self.constraints = natural_number_policy(constraints)
         self.max_attempts = max_attempts
         self.difficulty = difficulty
         self.dev_mode = dev_mode
+        self.review_story = review_story
+        self.request_diagnostics = request_diagnostics
+
+    async def _review_story(self, problem, language: str):
+        """Read and validate the provider's independent story review output."""
+        from pydantic import ValidationError
+
+        from .schemas import StoryReview
+
+        review = await self.provider.review_story(
+            request=json.dumps({"statement": problem.statement}, ensure_ascii=False, separators=(",", ":")),
+            language=language, dev_mode=self.dev_mode,
+        )
+        try:
+            return StoryReview.model_validate(review.model_dump() if isinstance(review, StoryReview) else review)
+        except ValidationError as error:
+            raise GeneratedProblemInvalid([
+                ValidationIssue("invalid_story_review", "The provider returned an invalid story review.")
+            ]) from error
+
+    def _validate_story(self, review, expression: str) -> None:
+        issues = []
+        for rejected, code, message in (
+            (not review.has_story, "not_story", "The statement is a bare calculation rather than a story."),
+            (not review.has_question, "missing_question", "The story does not ask for a quantity."),
+            (review.ambiguous, "ambiguous_story", "The story has no unambiguous arithmetic interpretation."),
+            (not review.consistent_quantities, "inconsistent_story", "The story contains inconsistent quantities."),
+        ):
+            if rejected:
+                issues.append(ValidationIssue(code, message))
+        if review.expression is None:
+            issues.append(ValidationIssue("missing_story_expression", "The story's calculation could not be reconstructed."))
+        else:
+            try:
+                validate_expression(review.expression, replace(self.constraints, required_expression=None))
+                matches = (
+                    expression_structure(review.expression, commutative=True)
+                    == expression_structure(expression, commutative=True)
+                    )
+            except ProblemValidationError:
+                matches = False
+            if not matches:
+                issues.append(ValidationIssue("story_expression_mismatch", "The independently reconstructed calculation disagrees with the candidate."))
+        if issues:
+            raise GeneratedProblemInvalid(issues)
 
     async def generate(
             self, 
@@ -111,6 +168,7 @@ class ProblemGenerator:
         failures: list[GeneratedProblemInvalid] = []
         for attempt in range(1, self.max_attempts + 1):
             problem = None
+            review = None
             try:
                 problem = await self.provider.generate_problem(
                     request=request, language=language, dev_mode=self.dev_mode,
@@ -135,6 +193,9 @@ class ProblemGenerator:
                     raise ProblemConstraintViolation([
                         ValidationIssue("difficulty_mismatch", "Declared difficulty does not match the requested level.")
                         ])
+                if self.review_story:
+                    review = await self._review_story(problem, language)
+                    self._validate_story(review, problem.expression)
             except ProblemValidationError as error:
                 failure = classify_validation_error(error)
             except GeneratedProblemInvalid as error:
@@ -149,7 +210,7 @@ class ProblemGenerator:
                         answer=analysis.value.numerator,
                         operations=list(dict.fromkeys(analysis.operations)),
                         )
-                return ValidatedProblem(problem, analysis, attempt)
+                return ValidatedProblem(problem, analysis, attempt, self.constraints, self.request_diagnostics, review)
 
             failures.append(failure)
             logger.warning(
@@ -158,6 +219,6 @@ class ProblemGenerator:
                 "; ".join(f"{issue.code}: {issue.message}" for issue in failure.issues),
                 )
             if on_rejection is not None:
-                on_rejection(GenerationRejection(attempt, failure, problem))
+                on_rejection(GenerationRejection(attempt, failure, problem, self.constraints, self.request_diagnostics, review))
 
         raise GenerationExhausted(failures) from failures[-1]

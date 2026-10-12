@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from copy import deepcopy
 from typing import TYPE_CHECKING
@@ -170,6 +171,7 @@ async def _send_development_data(
                 f"{issue.code}: {issue.message}" for issue in rejection.error.issues
                 )
             )
+        details += "\n" + _request_details(rejection)
         if rejection.problem is not None:
             details += "\n" + _candidate_details(rejection.problem)
             try:
@@ -183,10 +185,43 @@ async def _send_development_data(
     if result is not None:
         details = (
             f"[Development data - VERIFIED, attempt {result.attempts}]\n"
+            "Checks: arithmetic and compiled requirements passed.\n"
+            + _request_details(result) + "\n"
             + _candidate_details(result.problem)
             + "\n" + _solution_details(result.analysis)
             )
         await message.reply_text(details[:4000], parse_mode=None)
+
+
+def _request_details(record) -> str:
+    """Render interpreted requirements, effective limits, and story review status."""
+    lines = []
+    diagnostics = record.request_diagnostics
+    if diagnostics is not None:
+        if "interpreted" in diagnostics:
+            lines.append("Interpreted requirements: " + json.dumps(diagnostics["interpreted"], ensure_ascii=False)[:950])
+        lines.append("Request corrections: " + ", ".join(diagnostics.get("corrected_fields", [])))
+    policy = record.constraints
+    if policy is not None:
+        lines.extend([
+            f"Effective operand range (inclusive): {policy.min_operand}..{policy.max_operand}",
+            f"Allowed operators: {', '.join(policy.allowed_operations)}; required: {', '.join(policy.required_operations) or 'none'}",
+            f"Operation count: {policy.min_operations}..{policy.max_operations}",
+            f"Intermediate cap: {policy.max_intermediate_value}; final cap: {policy.max_final_value}",
+            f"Required expression: {policy.required_expression or 'none'}",
+            f"Fixed operands: {policy.fixed_operands}",
+        ])
+    review = record.story_review
+    if review is None:
+        lines.append("Story review: not performed; calculations alone do not establish story agreement.")
+    else:
+        lines.extend([
+            "Story review (model assessment): "
+            f"story={review.has_story}, question={review.has_question}, "
+            f"ambiguous={review.ambiguous}, consistent={review.consistent_quantities}",
+            f"Story calculation: {review.expression}",
+            ])
+    return "\n".join(lines)
 
 
 def _session_key(update: Update) -> tuple[int, int]:

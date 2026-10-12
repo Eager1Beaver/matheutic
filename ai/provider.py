@@ -12,10 +12,26 @@ if TYPE_CHECKING:
         MathProblem,
         ProblemContent,
         RequestInterpretation,
+        StoryReview,
     )
 
 
 class AIProvider(ABC):
+    async def review_story(
+            self, 
+            request: str, 
+            language: str = "en", 
+            *, dev_mode: bool = False,
+            ) -> StoryReview:
+        """Independently read a story and reconstruct its arithmetic question."""
+        from core.problem_validator import ValidationIssue
+
+        from .errors import GeneratedProblemInvalid
+
+        raise GeneratedProblemInvalid([
+            ValidationIssue("story_review_unavailable", "The provider cannot review story problems.")
+            ])
+
     async def interpret_turn(
             self, 
             request: str, 

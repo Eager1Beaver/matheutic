@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from fractions import Fraction
@@ -31,6 +32,7 @@ _LOCAL_ACTIONS = {
     "explain": {"why", "i don't understand", "i don't understand the hint"},
     }
 _GREETING = re.compile(r"(?:hi|hello|hey|good morning|good afternoon|good evening)[!.,\s]*", re.I)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -109,7 +111,11 @@ class CoachInterpreter:
             request = compile_decision(RequestInterpretation(
                 intent=interpretation.intent, reason=interpretation.reason,
                 problem_request=interpretation.problem_request,
-            ), self.constraints)
+            ), self.constraints, source_text=text,
+                previous_request=session_context(session).get("previous_request"))
+            if self.dev_mode and request.constraints is not None:
+                logger.info("Compiled arithmetic request: constraints=%s corrected_fields=%s",
+                            request.constraints, request.diagnostics["corrected_fields"])
             return CoachDecision(request.intent, request.reason, request=request,
                                  reusable_context=interpretation.reusable_context if request.intent == "generate_problem" else "")
         return CoachDecision(interpretation.intent)

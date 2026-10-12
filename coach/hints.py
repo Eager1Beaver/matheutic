@@ -114,7 +114,8 @@ async def render_hint(
             raise HintGenerationInvalid([ValidationIssue("invalid_hint_schema", "The provider returned invalid hint wording.")]) from error
         introduction = validate_wording(wording.text)
     except AIProviderError as error:
-        logger.warning("Hint wording fallback: category=%s", type(error).__name__)
+        logger.warning("Hint wording fallback: category=%s issues=%s", type(error).__name__,
+                       ",".join(issue.code for issue in getattr(error, "issues", ())) or "none")
         introduction = plan.direction
     return f"{introduction}\n\n{plan.task}"
 

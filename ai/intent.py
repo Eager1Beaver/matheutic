@@ -8,10 +8,12 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 from core.constraints import SUPPORTED_OPERATIONS, ProblemConstraints
-from core.problem_validator import ValidationIssue
+from core.expression import expression_structure
+from core.problem_validator import ValidationIssue, validate_expression
 
 from .errors import RequestInterpretationInvalid, UnsupportedProblemRequest
 from .policy import natural_number_policy
+from .request_grounding import ground_request
 
 if TYPE_CHECKING:
     from .provider import AIProvider
@@ -41,6 +43,7 @@ class RequestDecision:
     constraints: ProblemConstraints | None = None
     difficulty: int | None = None
     language: str = "en"
+    diagnostics: dict | None = None
 
 
 def _smaller_limit(first: int | None, second: int | None) -> int | None:
@@ -55,13 +58,26 @@ def _smaller_limit(first: int | None, second: int | None) -> int | None:
 def compile_constraints(spec: ProblemRequest, base: ProblemConstraints) -> ProblemConstraints:
     """Intersect interpreted arithmetic requirements with the application's policy."""
     try:
+        expression = getattr(spec, "required_expression", None)
+        fixed = getattr(spec, "fixed_operands", None)
+        if (base.required_expression is not None and expression is not None
+                and expression_structure(base.required_expression) != expression_structure(expression)):
+            raise ValueError("The requested expression conflicts with the application expression")
+        if (base.fixed_operands is not None and fixed is not None
+                and sorted(base.fixed_operands) != sorted(fixed)):
+            raise ValueError("The fixed operands conflict with the application operands")
+        # Explicit quantities can exceed the ordinary practice defaults.
+        default_max = max(99, max(fixed, default=0) if fixed is not None else 0)
         requested = ProblemConstraints(
             allowed_operations=spec.allowed_operations, required_operations=spec.required_operations,
-            min_operand=spec.min_operand, max_operand=spec.max_operand,
-            min_operations=spec.min_operations, max_operations=spec.max_operations,
+            min_operand=0 if spec.min_operand is None else spec.min_operand,
+            max_operand=default_max if spec.max_operand is None else spec.max_operand,
+            min_operations=1 if spec.min_operations is None else spec.min_operations,
+            max_operations=3 if spec.max_operations is None else spec.max_operations,
             require_integer_division=True,
             non_negative=True, non_negative_intermediate=True,
             max_intermediate_value=spec.max_intermediate_value, max_final_value=spec.max_final_value,
+            required_expression=expression, fixed_operands=fixed,
             )
         allowed = tuple(op for op in SUPPORTED_OPERATIONS
                         if op in base.allowed_operations and op in requested.allowed_operations)
@@ -78,7 +94,15 @@ def compile_constraints(spec: ProblemRequest, base: ProblemConstraints) -> Probl
             non_negative_intermediate=base.non_negative_intermediate or requested.non_negative_intermediate,
             max_intermediate_value=_smaller_limit(base.max_intermediate_value, requested.max_intermediate_value),
             max_final_value=_smaller_limit(base.max_final_value, requested.max_final_value),
+            required_expression=base.required_expression or requested.required_expression,
+            fixed_operands=base.fixed_operands if base.fixed_operands is not None else requested.fixed_operands,
             )
+        if policy.fixed_operands is not None and any(
+            not policy.min_operand <= value <= policy.max_operand for value in policy.fixed_operands
+        ):
+            raise ValueError("Fixed operands conflict with the requested operand range")
+        if policy.required_expression is not None:
+            validate_expression(policy.required_expression, policy)
     except ValueError as error:
         logger.warning("Rejected arithmetic request constraints: %s", error)
         raise UnsupportedProblemRequest(
@@ -92,7 +116,8 @@ def compile_constraints(spec: ProblemRequest, base: ProblemConstraints) -> Probl
     return policy
 
 
-def compile_decision(interpretation: RequestInterpretation, base: ProblemConstraints) -> RequestDecision:
+def compile_decision(interpretation: RequestInterpretation, base: ProblemConstraints, *,
+                     source_text: str | None = None, previous_request: dict | None = None) -> RequestDecision:
     """Check routing invariants and build a canonical generation request."""
     if (interpretation.intent not in _ROUTE_REASONS
             or interpretation.reason not in _ROUTE_REASONS[interpretation.intent]
@@ -107,7 +132,10 @@ def compile_decision(interpretation: RequestInterpretation, base: ProblemConstra
     # and an error will be raised specifying supported language
     if spec.language != "en":
         return RequestDecision("unsupported_request", "unsupported_language")
+    diagnostics = None
     try:
+        if source_text is not None:
+            spec, diagnostics = ground_request(spec, source_text, previous_request)
         policy = compile_constraints(spec, base)
     except UnsupportedProblemRequest as error:
         return RequestDecision("unsupported_request", error.reason)
@@ -121,7 +149,9 @@ def compile_decision(interpretation: RequestInterpretation, base: ProblemConstra
     if spec.context:
         payload["context"] = spec.context
     request = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return RequestDecision("generate_problem", "none", request, policy, spec.difficulty, spec.language)
+    if diagnostics is not None:
+        diagnostics["effective"] = bounds
+    return RequestDecision("generate_problem", "none", request, policy, spec.difficulty, spec.language, diagnostics)
 
 
 class RequestInterpreter:
@@ -154,4 +184,4 @@ class RequestInterpreter:
         interpretation = await self.provider.interpret_request(
             request=text, language="en", dev_mode=self.dev_mode,
             )
-        return compile_decision(interpretation, self.constraints)
+        return compile_decision(interpretation, self.constraints, source_text=text)

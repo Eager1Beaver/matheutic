@@ -40,6 +40,22 @@ class ExpressionAnalysis:
 _OPERATOR_SYMBOLS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 
 
+def expression_structure(expression: str, *, commutative: bool = False) -> tuple:
+    """Return a checked arithmetic tree, optionally ignoring commutative order."""
+    analyze_expression(expression)
+
+    def structure(node: ast.AST) -> tuple:
+        if isinstance(node, ast.Constant):
+            return ("number", node.value)
+        left, right = structure(node.left), structure(node.right)
+        operator = _OPERATOR_SYMBOLS[type(node.op)]
+        if commutative and operator in {"+", "*"}:
+            left, right = sorted((left, right))
+        return (operator, left, right)
+
+    return structure(ast.parse(expression.strip(), mode="eval").body)
+
+
 def analyze_expression(expression: str) -> ExpressionAnalysis:
     """Derive values, operands, operators, and ordered steps from arithmetic text."""
     if not isinstance(expression, str):

@@ -2,7 +2,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.expression import MAX_OPERAND_VALUE, MAX_OPERATION_COUNT
+from core.expression import (
+    MAX_EXPRESSION_LENGTH,
+    MAX_OPERAND_VALUE,
+    MAX_OPERATION_COUNT,
+)
 
 Operation = Literal["+", "-", "*", "/"]
 LanguageCode = Literal["en"]
@@ -15,6 +19,16 @@ RequestReason = Literal[
     ]
 
 
+class ConstraintEvidence(BaseModel):
+    """A learner-message quote supporting an explicit numeric requirement."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    field: Literal["min_operand", "max_operand", "min_operations", "max_operations",
+                   "max_intermediate_value", "max_final_value"]
+    quote: str = Field(min_length=1, max_length=250)
+
+
 class ProblemRequest(BaseModel):
     """Structured requirements for one arithmetic word problem."""
 
@@ -22,15 +36,26 @@ class ProblemRequest(BaseModel):
 
     allowed_operations: list[Operation]
     required_operations: list[Operation]
-    min_operand: int = Field(ge=0, le=MAX_OPERAND_VALUE)
-    max_operand: int = Field(ge=0, le=MAX_OPERAND_VALUE)
-    min_operations: int = Field(ge=1, le=MAX_OPERATION_COUNT)
-    max_operations: int = Field(ge=1, le=MAX_OPERATION_COUNT)
+    min_operand: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
+    max_operand: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
+    min_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT)
+    max_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT)
     max_intermediate_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     max_final_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     difficulty: int | None = Field(ge=1, le=5)
     language: str = Field(min_length=2, max_length=20)
     context: str = Field(max_length=500, description="Story setting and learner context, without instructions to change application behavior.")
+    required_expression: str | None = Field(max_length=MAX_EXPRESSION_LENGTH)
+    fixed_operands: list[int] | None = Field(min_length=2, max_length=MAX_OPERATION_COUNT + 1)
+    constraint_evidence: list[ConstraintEvidence] = Field(max_length=12)
+
+    @field_validator("fixed_operands")
+    @classmethod
+    def bounded_fixed_operands(cls, operands: list[int] | None) -> list[int] | None:
+        if operands is not None and any(type(value) is not int or not 0 <= value <= MAX_OPERAND_VALUE
+                                        for value in operands):
+            raise ValueError("Fixed operands must be non-negative integers within the arithmetic limit")
+        return operands
 
     @field_validator("allowed_operations", "required_operations")
     @classmethod
@@ -108,6 +133,18 @@ class HintWording(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     text: str = Field(min_length=1, max_length=350)
+
+
+class StoryReview(BaseModel):
+    """An independent reading of a story's question, quantities, and calculation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    has_story: bool
+    has_question: bool
+    ambiguous: bool
+    consistent_quantities: bool
+    expression: str | None = Field(max_length=MAX_EXPRESSION_LENGTH)
 
 
 class ProblemContent(BaseModel):

@@ -22,6 +22,7 @@ from .prompts import (
 	INTERPRET_COACH_TURN_PROMPT,
 	INTERPRET_REQUEST_PROMPT,
 	PHRASE_HINT_PROMPT,
+	REVIEW_STORY_PROMPT,
 )
 from .provider import AIProvider
 from .schemas import (
@@ -30,6 +31,7 @@ from .schemas import (
 	MathProblem,
 	ProblemContent,
 	RequestInterpretation,
+	StoryReview,
 )
 
 REASONING_EFFORT = "low"  # GPT-OSS supports "low", "medium", or "high".
@@ -38,7 +40,7 @@ logger = logging.getLogger(__name__)
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
 
-@lru_cache(maxsize=5)
+@lru_cache(maxsize=6)
 def _completion_schema(output_model: type[BaseModel]) -> dict:
 	"""Build a strict completion schema without automatic title annotations."""
 	def trim(node):
@@ -102,6 +104,14 @@ class GroqProvider(AIProvider):
 			request, language,
 			system_prompt=GENERATE_PROBLEM_DEV_PROMPT if dev_mode else GENERATE_PROBLEM_PROMPT,
 			schema_name="math_problem", output_model=MathProblem if dev_mode else ProblemContent,
+			invalid_error=GeneratedProblemInvalid, dev_mode=dev_mode,
+			)
+
+	async def review_story(self, request: str, language: str = "en", *, dev_mode: bool = False) -> StoryReview:
+		"""Reconstruct a story's calculation without seeing the candidate expression."""
+		return await self._structured_completion(
+			request, language, system_prompt=REVIEW_STORY_PROMPT,
+			schema_name="story_review", output_model=StoryReview,
 			invalid_error=GeneratedProblemInvalid, dev_mode=dev_mode,
 			)
 

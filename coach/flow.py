@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ai.coach import CoachDecision, CoachInterpreter
 from ai.intent import RequestDecision, compile_decision
@@ -96,6 +96,7 @@ class Coach:
                     min_operand=0, max_operand=99, min_operations=1, max_operations=3,
                     max_intermediate_value=None, max_final_value=None,
                     difficulty=None, language="en", context="",
+                    required_expression=None, fixed_operands=None, constraint_evidence=[],
                     ),
                     ), 
                     self.interpreter.constraints,
@@ -108,6 +109,8 @@ class Coach:
             difficulty=request.difficulty,
             max_attempts=self.max_attempts, 
             dev_mode=self.dev_mode,
+            review_story=True,
+            request_diagnostics=request.diagnostics,
             )
         result = await generator.generate(request.generation_request, request.language, on_rejection=on_rejection)
         if session.active:
@@ -117,6 +120,15 @@ class Coach:
         session.difficulty = getattr(result.problem, "difficulty", request.difficulty)
         session.language = request.language
         payload = json.loads(request.generation_request)
+        reusable_policy = replace(request.constraints,
+                                  required_expression=self.interpreter.constraints.required_expression,
+                                  fixed_operands=self.interpreter.constraints.fixed_operands)
+        for field in ("required_expression", "fixed_operands"):
+            value = getattr(reusable_policy, field)
+            if value is None:
+                payload["constraints"].pop(field, None)
+            else:
+                payload["constraints"][field] = value
         if decision.intent == "generate_problem":
             if decision.reusable_context:
                 payload["context"] = decision.reusable_context
@@ -127,7 +139,8 @@ class Coach:
         session.repeat_request = RequestDecision(
             "generate_problem", "none",
             json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-            request.constraints, session.difficulty, request.language,
+            reusable_policy, session.difficulty, request.language,
+            {"source": "reused preferences", "effective": payload["constraints"]},
             )
         return CoachReply(decision.intent, result.problem.statement, generated=result)
 

@@ -1,7 +1,12 @@
 """Application-owned constraints for arithmetic problem validation."""
 from dataclasses import dataclass
 
-from core.expression import MAX_ARITHMETIC_BITS, MAX_OPERAND_VALUE, MAX_OPERATION_COUNT
+from core.expression import (
+    MAX_ARITHMETIC_BITS,
+    MAX_OPERAND_VALUE,
+    MAX_OPERATION_COUNT,
+    analyze_expression,
+)
 
 SUPPORTED_OPERATIONS = ("+", "-", "*", "/")
 
@@ -19,6 +24,8 @@ class ProblemConstraints:
     non_negative_intermediate: bool | None = None
     max_intermediate_value: int | None = None
     max_final_value: int | None = None
+    required_expression: str | None = None
+    fixed_operands: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         for field in ("allowed_operations", "required_operations"):
@@ -50,3 +57,12 @@ class ProblemConstraints:
             if value is not None and (type(value) is not int or value < 0
                                       or value.bit_length() > MAX_ARITHMETIC_BITS):
                 raise ValueError(f"{field} must be a non-negative integer within the arithmetic limit")
+        if self.required_expression is not None:
+            analyze_expression(self.required_expression)
+        if self.fixed_operands is not None:
+            if (not isinstance(self.fixed_operands, (list, tuple))
+                    or not 2 <= len(self.fixed_operands) <= MAX_OPERATION_COUNT + 1
+                    or any(type(value) is not int or not 0 <= value <= MAX_OPERAND_VALUE
+                           for value in self.fixed_operands)):
+                raise ValueError("Fixed operands must be a bounded list of non-negative integers")
+            object.__setattr__(self, "fixed_operands", tuple(self.fixed_operands))
