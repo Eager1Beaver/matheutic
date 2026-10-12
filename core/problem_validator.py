@@ -57,13 +57,20 @@ def _arithmetic_issues(
         reject("non_integer_result", "Expression does not produce an integer result.")
     actual = set(analysis.operations)
     if not actual <= set(constraints.allowed_operations):
-        reject("operation_not_allowed", "Expression uses an operation forbidden by the request constraints.")
+        reject("operation_not_allowed", f"Forbidden operators: {sorted(actual - set(constraints.allowed_operations))}.")
     if not set(constraints.required_operations) <= actual:
-        reject("required_operation_missing", "Expression omits a required operation.")
+        reject("required_operation_missing", f"Missing required operators: {sorted(set(constraints.required_operations) - actual)}.")
     if not constraints.min_operations <= len(analysis.operations) <= constraints.max_operations:
-        reject("operation_count_mismatch", "Expression does not meet the required operation count.")
+        reject("operation_count_mismatch", f"Expression has {len(analysis.operations)} operations; "
+               f"expected {constraints.min_operations}..{constraints.max_operations}.")
     if any(not constraints.min_operand <= operand <= constraints.max_operand for operand in analysis.operands):
-        reject("operand_out_of_range", "An operand is outside the allowed range.")
+        outside = sorted(
+            {operand for operand in analysis.operands
+             if not constraints.min_operand <= operand <= constraints.max_operand}
+             )
+        reject("operand_out_of_range",
+               f"Operands {outside} are outside the inclusive range "
+               f"{constraints.min_operand}..{constraints.max_operand}.")
     if constraints.require_integer_division and any(
         step.operation == "/" and step.result.denominator != 1 for step in analysis.steps
         ):
@@ -72,12 +79,24 @@ def _arithmetic_issues(
         reject("final_negative", "The final result must be non-negative.")
     if constraints.non_negative_intermediate and any(value < 0 for value in analysis.intermediate_values):
         reject("intermediate_negative", "Intermediate results must be non-negative.")
-    if constraints.max_intermediate_value is not None and any(
-        abs(value) > constraints.max_intermediate_value for value in analysis.intermediate_values
+    intermediate = (analysis.intermediate_values if constraints.intermediate_includes_final
+                    else analysis.intermediate_values[:-1])
+    if constraints.min_intermediate_value is not None and any(
+        value < constraints.min_intermediate_value for value in intermediate
         ):
-        reject("intermediate_too_large", "An intermediate result exceeds the allowed magnitude.")
+        reject("intermediate_too_small", f"Intermediate results must be at least {constraints.min_intermediate_value}.")
+    if constraints.min_final_value is not None and analysis.value < constraints.min_final_value:
+        reject("final_too_small", f"The final answer must be at least {constraints.min_final_value}.")
+    if constraints.max_intermediate_value is not None and any(
+        abs(value) > constraints.max_intermediate_value for value in intermediate
+        ):
+        outside = [str(value) for value in intermediate
+                   if abs(value) > constraints.max_intermediate_value]
+        reject("intermediate_too_large",
+               f"Calculated values {outside} exceed the intermediate limit {constraints.max_intermediate_value}.")
     if constraints.max_final_value is not None and abs(analysis.value) > constraints.max_final_value:
-        reject("final_too_large", "The final result exceeds the allowed magnitude.")
+        reject("final_too_large",
+               f"Final value {analysis.value} exceeds the final limit {constraints.max_final_value}.")
     return issues
 
 
@@ -94,6 +113,7 @@ def validate_expression(
     if issues:
         raise ProblemValidationError(issues)
     return analysis
+
 
 
 def validate_problem(

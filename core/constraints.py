@@ -5,7 +5,6 @@ from core.expression import (
     MAX_ARITHMETIC_BITS,
     MAX_OPERAND_VALUE,
     MAX_OPERATION_COUNT,
-    analyze_expression,
 )
 
 SUPPORTED_OPERATIONS = ("+", "-", "*", "/")
@@ -24,8 +23,9 @@ class ProblemConstraints:
     non_negative_intermediate: bool | None = None
     max_intermediate_value: int | None = None
     max_final_value: int | None = None
-    required_expression: str | None = None
-    fixed_operands: tuple[int, ...] | None = None
+    min_intermediate_value: int | None = None
+    min_final_value: int | None = None
+    intermediate_includes_final: bool = True
 
     def __post_init__(self) -> None:
         for field in ("allowed_operations", "required_operations"):
@@ -52,17 +52,14 @@ class ProblemConstraints:
             object.__setattr__(self, "non_negative_intermediate", self.non_negative)
         elif type(self.non_negative_intermediate) is not bool:
             raise ValueError("non_negative_intermediate must be a boolean")
-        for field in ("max_intermediate_value", "max_final_value"):
+        if type(self.intermediate_includes_final) is not bool:
+            raise ValueError("intermediate_includes_final must be a boolean")
+        for field in ("min_intermediate_value", "max_intermediate_value", "min_final_value", "max_final_value"):
             value = getattr(self, field)
             if value is not None and (type(value) is not int or value < 0
                                       or value.bit_length() > MAX_ARITHMETIC_BITS):
                 raise ValueError(f"{field} must be a non-negative integer within the arithmetic limit")
-        if self.required_expression is not None:
-            analyze_expression(self.required_expression)
-        if self.fixed_operands is not None:
-            if (not isinstance(self.fixed_operands, (list, tuple))
-                    or not 2 <= len(self.fixed_operands) <= MAX_OPERATION_COUNT + 1
-                    or any(type(value) is not int or not 0 <= value <= MAX_OPERAND_VALUE
-                           for value in self.fixed_operands)):
-                raise ValueError("Fixed operands must be a bounded list of non-negative integers")
-            object.__setattr__(self, "fixed_operands", tuple(self.fixed_operands))
+        for kind in ("intermediate", "final"):
+            lower, upper = getattr(self, f"min_{kind}_value"), getattr(self, f"max_{kind}_value")
+            if lower is not None and upper is not None and lower > upper:
+                raise ValueError(f"The {kind} result bounds must be ordered")

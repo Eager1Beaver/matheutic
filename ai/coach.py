@@ -42,14 +42,14 @@ class CoachDecision:
     value: Fraction | None = None
     final_answer: bool = False
     request: RequestDecision | None = None
-    reusable_context: str = ""
 
 
 def session_context(session: CoachSession) -> dict:
     """Build a bounded context without the expected numerical answer."""
     payload = {"state": session.state.value, "active_problem": session.active}
     if session.repeat_request is not None:
-        payload["previous_request"] = json.loads(session.repeat_request.generation_request)
+        payload["previous_request"] = {"preferences": session.repeat_request.preferences or {},
+                                       "difficulty": session.repeat_request.difficulty}
         payload["previous_request"]["language"] = session.language
     if session.run is not None:
         run = session.run
@@ -114,8 +114,7 @@ class CoachInterpreter:
             ), self.constraints, source_text=text,
                 previous_request=session_context(session).get("previous_request"))
             if self.dev_mode and request.constraints is not None:
-                logger.info("Compiled arithmetic request: constraints=%s corrected_fields=%s",
-                            request.constraints, request.diagnostics["corrected_fields"])
-            return CoachDecision(request.intent, request.reason, request=request,
-                                 reusable_context=interpretation.reusable_context if request.intent == "generate_problem" else "")
+                logger.info("Compiled arithmetic request: constraints=%s explicit_fields=%s",
+                            request.constraints, list(request.preferences or {}))
+            return CoachDecision(request.intent, request.reason, request=request)
         return CoachDecision(interpretation.intent)

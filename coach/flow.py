@@ -1,18 +1,23 @@
 """Coach actions, verified answer progression, and bounded problem generation."""
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from ai.coach import CoachDecision, CoachInterpreter
+from ai.errors import GenerationExhausted
 from ai.intent import RequestDecision, compile_decision
-from ai.orchestrator import ProblemGenerator, ValidatedProblem
+from ai.orchestrator import GenerationRejection, ProblemGenerator, ValidatedProblem
 from ai.provider import AIProvider
 from core.constraints import ProblemConstraints
 
 from . import messages
 from .hints import plan_hint, render_hint, solution_text
-from .session import AnswerAttempt, CoachSession, CoachState, ProblemRun
+from .session import (
+    AnswerAttempt,
+    CoachSession,
+    CoachState,
+    ProblemRun,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class Coach:
             dev_mode: bool = False,
             ) -> None:
         self.provider = provider
+        self.calculation_selector = None
         self.interpreter = CoachInterpreter(provider, constraints, dev_mode=dev_mode)
         self.max_attempts = max_attempts
         self.dev_mode = dev_mode
@@ -87,22 +93,32 @@ class Coach:
         request = decision.request if decision.intent == "generate_problem" else session.repeat_request
         if request is None:
             from ai.schemas import ProblemRequest, RequestInterpretation
-
-            request = compile_decision(
-                RequestInterpretation(
+            request = compile_decision(RequestInterpretation(
                 intent="generate_problem", reason="none", 
                 problem_request=ProblemRequest(
-                    allowed_operations=["+", "-", "*", "/"], required_operations=[],
-                    min_operand=0, max_operand=99, min_operations=1, max_operations=3,
-                    max_intermediate_value=None, max_final_value=None,
-                    difficulty=None, language="en", context="",
-                    required_expression=None, fixed_operands=None, constraint_evidence=[],
-                    ),
+                    allowed_operations=None, required_operations=[], min_operand=None, max_operand=None,
+                    min_operations=None, max_operations=None, min_intermediate_value=None,
+                    max_intermediate_value=None, min_final_value=None, max_final_value=None,
+                    difficulty=None, difficulty_change=0, inherit_previous=False, unresolved=False,
+                    clear_limits=[], language="en", theme="", style="",
+                    )
                     ), 
                     self.interpreter.constraints,
                     )
         if request.intent != "generate_problem":
             return CoachReply(decision.intent, route=request)
+        from coach.calculations import select_calculation
+        try:
+            plan = (self.calculation_selector or select_calculation)(request.constraints)
+        except GenerationExhausted as error:
+            if on_rejection is not None:
+                on_rejection(GenerationRejection(
+                    error.attempts, 
+                    error.last_failure,
+                    constraints=request.constraints, 
+                    request_diagnostics=request.diagnostics,
+                    ))
+            raise
         generator = ProblemGenerator(
             self.provider, 
             request.constraints, 
@@ -111,6 +127,7 @@ class Coach:
             dev_mode=self.dev_mode,
             review_story=True,
             request_diagnostics=request.diagnostics,
+            calculation=plan,
             )
         result = await generator.generate(request.generation_request, request.language, on_rejection=on_rejection)
         if session.active:
@@ -119,29 +136,7 @@ class Coach:
         session.state = CoachState.AWAITING_ANSWER
         session.difficulty = getattr(result.problem, "difficulty", request.difficulty)
         session.language = request.language
-        payload = json.loads(request.generation_request)
-        reusable_policy = replace(request.constraints,
-                                  required_expression=self.interpreter.constraints.required_expression,
-                                  fixed_operands=self.interpreter.constraints.fixed_operands)
-        for field in ("required_expression", "fixed_operands"):
-            value = getattr(reusable_policy, field)
-            if value is None:
-                payload["constraints"].pop(field, None)
-            else:
-                payload["constraints"][field] = value
-        if decision.intent == "generate_problem":
-            if decision.reusable_context:
-                payload["context"] = decision.reusable_context
-            else:
-                payload.pop("context", None)
-        if session.difficulty is not None:
-            payload["difficulty"] = session.difficulty
-        session.repeat_request = RequestDecision(
-            "generate_problem", "none",
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-            reusable_policy, session.difficulty, request.language,
-            {"source": "reused preferences", "effective": payload["constraints"]},
-            )
+        session.repeat_request = request
         return CoachReply(decision.intent, result.problem.statement, generated=result)
 
     def _answer(self, session: CoachSession, decision: CoachDecision) -> CoachReply:
@@ -171,8 +166,11 @@ class Coach:
         run.last_hint = None
         session.state = CoachState.AWAITING_ANSWER
         step = run.validated.analysis.steps[run.step_index]
-        return CoachReply("answer", f"That's right for that step.\n\nStep {run.step_index + 1} of {len(run.validated.analysis.steps)}: "
-                          f"work out {step.left} {step.operation} {step.right}. What is this step's result?")
+        return CoachReply(
+            "answer", 
+            f"That's right for that step.\n\nStep {run.step_index + 1} of {len(run.validated.analysis.steps)}: "
+            f"work out {step.left} {step.operation} {step.right}. What is this step's result?"
+            )
 
     async def _hint(self, session: CoachSession, intent: str, *, question: str = "") -> CoachReply:
         """Deliver progressive guidance or repeat it without consuming another level."""

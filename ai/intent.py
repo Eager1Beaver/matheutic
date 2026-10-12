@@ -1,38 +1,33 @@
-"""Route learner messages and compile arithmetic requests into validated policies."""
+"""Route learner messages and compile explicit preferences with difficulty presets."""
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
 
+from config.difficulty import DEFAULT_DIFFICULTY, difficulty_preset
 from core.constraints import SUPPORTED_OPERATIONS, ProblemConstraints
-from core.expression import expression_structure
-from core.problem_validator import ValidationIssue, validate_expression
+from core.problem_validator import ValidationIssue
 
 from .errors import RequestInterpretationInvalid, UnsupportedProblemRequest
 from .policy import natural_number_policy
-from .request_grounding import ground_request
-
-if TYPE_CHECKING:
-    from .provider import AIProvider
-    from .schemas import ProblemRequest, RequestInterpretation
-
-logger = logging.getLogger(__name__)
+from .request_scope import custom_problem_request
 
 _ROUTE_REASONS = {
     "generate_problem": {"none"},
     "unsupported_request": {
-        "unsupported_math", "unsupported_task", 
-        "impossible_constraints", "invalid_instructions", 
-        "unsupported_language", 
+        "unsupported_math", "unsupported_task", "impossible_constraints",
+        "invalid_instructions", "unsupported_language", "unsupported_custom_problem",
         },
     "off_topic": {"off_topic", "greeting"},
     "clarify": {"unclear", "answer_without_problem"},
-    }
+}
 _GREETING = re.compile(r"(?:hi|hello|hey|good morning|good afternoon|good evening)[!.,\s]*", re.I)
 _ANSWER = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?\??")
+NUMERIC_FIELDS = (
+    "min_operand", "max_operand", "min_operations", "max_operations",
+    "min_intermediate_value", "max_intermediate_value", "min_final_value", "max_final_value",
+    )
 
 
 @dataclass(frozen=True)
@@ -44,126 +39,121 @@ class RequestDecision:
     difficulty: int | None = None
     language: str = "en"
     diagnostics: dict | None = None
+    preferences: dict | None = None
 
 
-def _smaller_limit(first: int | None, second: int | None) -> int | None:
-    """Intersect optional upper bounds, retaining an existing limit."""
-    if first is None:
-        return second
-    if second is None:
-        return first
-    return min(first, second)
+def _resolve(spec, previous: dict | None):
+    fields = spec.model_dump() if hasattr(spec, "model_dump") else vars(spec).copy()
+    fields["required_operations"] = fields["required_operations"] or []
+    fields["clear_limits"] = fields["clear_limits"] or []
+    inherited = previous if fields["inherit_previous"] and previous else {}
+    preferences = dict(inherited.get("preferences", {}))
+    level = fields["difficulty"] if fields["difficulty"] is not None else inherited.get("difficulty", DEFAULT_DIFFICULTY)
+    level = max(1, min(5, level + fields["difficulty_change"]))
+    for name in NUMERIC_FIELDS + ("allowed_operations", "theme", "style"):
+        value = fields[name]
+        if value is not None and value != "":
+            preferences[name] = value
+    if fields["allowed_operations"] is not None or fields["required_operations"]:
+        preferences["required_operations"] = fields["required_operations"]
+    cleared = set(preferences.get("clear_limits", []))
+    cleared.difference_update(name for name in NUMERIC_FIELDS if fields[name] is not None)
+    cleared.update(fields["clear_limits"])
+    for name in fields["clear_limits"]:
+        preferences.pop(name, None)
+    preferences["clear_limits"] = sorted(cleared)
+    defaults = asdict(difficulty_preset(level))
+    custom_scale = (
+        any(name in preferences for name in ("min_operand", "max_operand"))
+        or preferences.get("min_operations", defaults["min_operations"]) > defaults["max_operations"]
+        or preferences.get("max_operations", defaults["max_operations"]) > defaults["max_operations"]
+        )
+    if custom_scale:
+        defaults["max_intermediate_value"] = defaults["max_final_value"] = None
+    values = defaults | {name: value for name, value in preferences.items() if name in defaults}
+    if "min_operand" in preferences and "max_operand" not in preferences:
+        values["max_operand"] = min(10**9, max(values["max_operand"], values["min_operand"] * 10))
+    if "min_operations" in preferences and "max_operations" not in preferences:
+        values["max_operations"] = max(values["min_operations"], values["max_operations"])
+    if "max_operations" in preferences and "min_operations" not in preferences:
+        values["min_operations"] = min(values["min_operations"], values["max_operations"])
+    for kind in ("intermediate", "final"):
+        lower, upper = f"min_{kind}_value", f"max_{kind}_value"
+        if lower in preferences and upper not in preferences and values[upper] is not None and values[lower] > values[upper]:
+            values[upper] = None
+    for name in cleared:
+        values[name] = None
+    required = preferences.get("required_operations", [])
+    if "allowed_operations" not in preferences:
+        values["allowed_operations"] = [op for op in SUPPORTED_OPERATIONS if op in set(values["allowed_operations"]) | set(required)]
+    values["required_operations"] = required
+    return fields, preferences, level, values
 
 
-def compile_constraints(spec: ProblemRequest, base: ProblemConstraints) -> ProblemConstraints:
-    """Intersect interpreted arithmetic requirements with the application's policy."""
+def compile_constraints(spec, base: ProblemConstraints) -> ProblemConstraints:
+    """Combine a fresh preference request with application-owned hard limits."""
+    return _policy(_resolve(spec, None)[3], base)
+
+
+def _policy(values: dict, base: ProblemConstraints) -> ProblemConstraints:
     try:
-        expression = getattr(spec, "required_expression", None)
-        fixed = getattr(spec, "fixed_operands", None)
-        if (base.required_expression is not None and expression is not None
-                and expression_structure(base.required_expression) != expression_structure(expression)):
-            raise ValueError("The requested expression conflicts with the application expression")
-        if (base.fixed_operands is not None and fixed is not None
-                and sorted(base.fixed_operands) != sorted(fixed)):
-            raise ValueError("The fixed operands conflict with the application operands")
-        # Explicit quantities can exceed the ordinary practice defaults.
-        default_max = max(99, max(fixed, default=0) if fixed is not None else 0)
-        requested = ProblemConstraints(
-            allowed_operations=spec.allowed_operations, required_operations=spec.required_operations,
-            min_operand=0 if spec.min_operand is None else spec.min_operand,
-            max_operand=default_max if spec.max_operand is None else spec.max_operand,
-            min_operations=1 if spec.min_operations is None else spec.min_operations,
-            max_operations=3 if spec.max_operations is None else spec.max_operations,
-            require_integer_division=True,
-            non_negative=True, non_negative_intermediate=True,
-            max_intermediate_value=spec.max_intermediate_value, max_final_value=spec.max_final_value,
-            required_expression=expression, fixed_operands=fixed,
-            )
-        allowed = tuple(op for op in SUPPORTED_OPERATIONS
-                        if op in base.allowed_operations and op in requested.allowed_operations)
-        required = tuple(op for op in SUPPORTED_OPERATIONS
-                         if op in base.required_operations or op in requested.required_operations)
-        policy = ProblemConstraints(
-            allowed_operations=allowed, required_operations=required,
-            min_operand=max(base.min_operand, requested.min_operand),
-            max_operand=min(base.max_operand, requested.max_operand),
-            min_operations=max(base.min_operations, requested.min_operations),
-            max_operations=min(base.max_operations, requested.max_operations),
-            require_integer_division=True,
-            non_negative=base.non_negative or requested.non_negative,
-            non_negative_intermediate=base.non_negative_intermediate or requested.non_negative_intermediate,
-            max_intermediate_value=_smaller_limit(base.max_intermediate_value, requested.max_intermediate_value),
-            max_final_value=_smaller_limit(base.max_final_value, requested.max_final_value),
-            required_expression=base.required_expression or requested.required_expression,
-            fixed_operands=base.fixed_operands if base.fixed_operands is not None else requested.fixed_operands,
-            )
-        if policy.fixed_operands is not None and any(
-            not policy.min_operand <= value <= policy.max_operand for value in policy.fixed_operands
-        ):
-            raise ValueError("Fixed operands conflict with the requested operand range")
-        if policy.required_expression is not None:
-            validate_expression(policy.required_expression, policy)
+        values = dict(values)
+        values["allowed_operations"] = tuple(op for op in SUPPORTED_OPERATIONS if op in values["allowed_operations"] and op in base.allowed_operations)
+        values["required_operations"] = tuple(op for op in SUPPORTED_OPERATIONS if op in values["required_operations"] or op in base.required_operations)
+        for lower, upper in (("min_operand", "max_operand"), ("min_operations", "max_operations"),
+                             ("min_intermediate_value", "max_intermediate_value"), ("min_final_value", "max_final_value")):
+            base_lower, base_upper = getattr(base, lower), getattr(base, upper)
+            if base_lower is not None:
+                values[lower] = base_lower if values[lower] is None else max(values[lower], base_lower)
+            if base_upper is not None:
+                values[upper] = base_upper if values[upper] is None else min(values[upper], base_upper)
+        values["min_operations"] = max(values["min_operations"], len(values["required_operations"]))
+        policy = ProblemConstraints(**values, non_negative=True, non_negative_intermediate=True,
+                                    require_integer_division=True, intermediate_includes_final=False)
+        if policy.max_operand == 0 and "/" in policy.required_operations:
+            raise ValueError("Division requires a nonzero divisor")
+        if policy.max_operand == 0 and policy.allowed_operations == ("/",):
+            raise ValueError("Division requires a nonzero divisor")
+        return policy
     except ValueError as error:
-        logger.warning("Rejected arithmetic request constraints: %s", error)
-        raise UnsupportedProblemRequest(
-            "The arithmetic requirements conflict with the supported policy.", reason="impossible_constraints"
-            ) from error
-    if policy.max_operand == 0 and (
-        "/" in policy.required_operations or policy.allowed_operations == ("/",)
-        ):
-        logger.warning("Rejected arithmetic request constraints: division requires a non-zero divisor")
-        raise UnsupportedProblemRequest("Division cannot use only zero operands.", reason="impossible_constraints")
-    return policy
+        raise UnsupportedProblemRequest(reason="impossible_constraints") from error
 
 
-def compile_decision(interpretation: RequestInterpretation, base: ProblemConstraints, *,
-                     source_text: str | None = None, previous_request: dict | None = None) -> RequestDecision:
-    """Check routing invariants and build a canonical generation request."""
+def compile_decision(interpretation, base: ProblemConstraints, *, source_text: str | None = None,
+                     previous_request: dict | None = None) -> RequestDecision:
+    """Resolve relative preferences and produce a reproducible arithmetic policy."""
     if (interpretation.intent not in _ROUTE_REASONS
             or interpretation.reason not in _ROUTE_REASONS[interpretation.intent]
             or ((interpretation.intent == "generate_problem") != (interpretation.problem_request is not None))):
-        raise RequestInterpretationInvalid([
-            ValidationIssue("inconsistent_route", "The interpreter returned an inconsistent routing decision.")
-            ])
+        raise RequestInterpretationInvalid([ValidationIssue("inconsistent_route", "The interpreter returned an inconsistent routing decision.")])
     if interpretation.intent != "generate_problem":
         return RequestDecision(interpretation.intent, interpretation.reason)
+    if source_text and custom_problem_request(source_text):
+        return RequestDecision("unsupported_request", "unsupported_custom_problem")
     spec = interpretation.problem_request
     # TODO: other languages will be supported; maybe pass a list of supported ones
     # and an error will be raised specifying supported language
     if spec.language != "en":
         return RequestDecision("unsupported_request", "unsupported_language")
-    diagnostics = None
+    if spec.unresolved:
+        return RequestDecision("clarify", "unclear")
+    fields, preferences, level, values = _resolve(spec, previous_request)
     try:
-        if source_text is not None:
-            spec, diagnostics = ground_request(spec, source_text, previous_request)
-        policy = compile_constraints(spec, base)
+        policy = _policy(values, base)
     except UnsupportedProblemRequest as error:
         return RequestDecision("unsupported_request", error.reason)
-    bounds = {key: value for key, value in asdict(policy).items() if value is not None}
-    # Integer division and non-negative values are fixed generation rules.
-    for key in ("require_integer_division", "non_negative", "non_negative_intermediate"):
-        bounds.pop(key)
-    payload = {"constraints": bounds}
-    if spec.difficulty is not None:
-        payload["difficulty"] = spec.difficulty
-    if spec.context:
-        payload["context"] = spec.context
-    request = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    if diagnostics is not None:
-        diagnostics["effective"] = bounds
-    return RequestDecision("generate_problem", "none", request, policy, spec.difficulty, spec.language, diagnostics)
+    effective = asdict(policy)
+    payload = {"constraints": effective, "difficulty": level,
+               "theme": preferences.get("theme", ""), "style": preferences.get("style", "")}
+    diagnostics = {"interpreted": fields, "explicit": preferences, "effective": effective,
+                   "preset": level}
+    return RequestDecision("generate_problem", "none", json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                           policy, level, spec.language, diagnostics, preferences)
 
 
 class RequestInterpreter:
-    """Classify messages before arithmetic generation and enforce the application policy."""
-
-    def __init__(
-            self, 
-            provider: AIProvider, 
-            constraints: ProblemConstraints | None = None,
-            *, 
-            dev_mode: bool = False,
-            ) -> None:
+    """Classify learner requests before compiling application-owned practice policies."""
+    def __init__(self, provider, constraints: ProblemConstraints | None = None, *, dev_mode: bool = False):
         if type(dev_mode) is not bool:
             raise ValueError("dev_mode must be a boolean")
         self.provider = provider
@@ -171,17 +161,12 @@ class RequestInterpreter:
         self.dev_mode = dev_mode
 
     async def interpret(self, request: str) -> RequestDecision:
-        """Handle simple messages locally and classify other text through the provider."""
         text = request.strip()
-        if not text:
-            return RequestDecision("clarify", "unclear")
-        if len(text) > 4000:
+        if not text or len(text) > 4000:
             return RequestDecision("clarify", "unclear")
         if _GREETING.fullmatch(text):
             return RequestDecision("off_topic", "greeting")
         if _ANSWER.fullmatch(text):
             return RequestDecision("clarify", "answer_without_problem")
-        interpretation = await self.provider.interpret_request(
-            request=text, language="en", dev_mode=self.dev_mode,
-            )
+        interpretation = await self.provider.interpret_request(request=text, language="en", dev_mode=self.dev_mode)
         return compile_decision(interpretation, self.constraints, source_text=text)

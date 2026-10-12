@@ -17,6 +17,13 @@ if TYPE_CHECKING:
 
 
 class AIProvider(ABC):
+    async def write_story(self, request: str, language: str = "en", *, dev_mode: bool = False):
+        """Write a story for an application-selected arithmetic calculation."""
+        from core.problem_validator import ValidationIssue
+
+        from .errors import GeneratedProblemInvalid
+        raise GeneratedProblemInvalid([ValidationIssue("story_wording_unavailable", "The provider cannot write arithmetic stories.")])
+
     async def review_story(
             self, 
             request: str, 

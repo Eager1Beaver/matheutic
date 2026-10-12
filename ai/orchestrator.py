@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.constraints import ProblemConstraints
@@ -36,7 +36,7 @@ _CONSTRAINT_CODES = frozenset({
     "operand_out_of_range", "non_integer_division", "final_negative",
     "intermediate_negative", "intermediate_too_large", "final_too_large",
     "difficulty_mismatch",
-    "required_expression_mismatch", "fixed_operands_mismatch",
+    "intermediate_too_small", "final_too_small",
     })
 
 
@@ -81,6 +81,7 @@ class ProblemGenerator:
             dev_mode: bool = False,
             review_story: bool = False,
             request_diagnostics: dict | None = None,
+            calculation=None,
             ) -> None:
         if constraints is not None and not isinstance(constraints, ProblemConstraints):
             raise TypeError("constraints must be ProblemConstraints")
@@ -99,6 +100,7 @@ class ProblemGenerator:
         self.dev_mode = dev_mode
         self.review_story = review_story
         self.request_diagnostics = request_diagnostics
+        self.calculation = calculation
 
     async def _review_story(self, problem, language: str):
         """Read and validate the provider's independent story review output."""
@@ -131,7 +133,7 @@ class ProblemGenerator:
             issues.append(ValidationIssue("missing_story_expression", "The story's calculation could not be reconstructed."))
         else:
             try:
-                validate_expression(review.expression, replace(self.constraints, required_expression=None))
+                validate_expression(review.expression, self.constraints)
                 matches = (
                     expression_structure(review.expression, commutative=True)
                     == expression_structure(expression, commutative=True)
@@ -166,13 +168,31 @@ class ProblemGenerator:
                 )
 
         failures: list[GeneratedProblemInvalid] = []
+        feedback = None
         for attempt in range(1, self.max_attempts + 1):
             problem = None
             review = None
             try:
-                problem = await self.provider.generate_problem(
-                    request=request, language=language, dev_mode=self.dev_mode,
-                    )
+                if self.calculation is None:
+                    problem = await self.provider.generate_problem(request=request, language=language, dev_mode=self.dev_mode)
+                else:
+                    import ast
+
+                    from .schemas import MathProblem, StoryWording
+                    payload = json.loads(request)
+                    plan = self.calculation
+                    validate_expression(plan.expression, self.constraints)
+                    payload["calculation"] = {"expression": plan.expression, "tree": _quantity_tree(ast.parse(plan.expression, mode="eval").body)}
+                    if feedback is not None:
+                        payload["revision"] = feedback
+                    wording = await self.provider.write_story(request=json.dumps(payload, ensure_ascii=False, separators=(",", ":")), language=language, dev_mode=self.dev_mode)
+                    try:
+                        wording = StoryWording.model_validate(wording.model_dump() if hasattr(wording, "model_dump") else wording)
+                    except (ValueError, TypeError) as error:
+                        raise GeneratedProblemInvalid([ValidationIssue("invalid_story_wording", "The provider returned invalid story wording.")]) from error
+                    problem = MathProblem(statement=wording.statement, expression=plan.expression,
+                                          answer=plan.analysis.value.numerator, operations=list(dict.fromkeys(plan.analysis.operations)),
+                                          difficulty=self.difficulty or 1, language=language)
                 if not isinstance(problem.statement, str) or not problem.statement.strip():
                     raise GeneratedProblemInvalid([
                         ValidationIssue("empty_statement", "The problem statement must not be empty.")
@@ -213,12 +233,32 @@ class ProblemGenerator:
                 return ValidatedProblem(problem, analysis, attempt, self.constraints, self.request_diagnostics, review)
 
             failures.append(failure)
+            feedback = {
+                "issues": [{"code": issue.code, "detail": issue.message} for issue in failure.issues],
+                "previous_statement": problem.statement[:1000] if problem is not None else None,
+                "story_calculation": review.expression if review is not None else None,
+                "instruction": "Revise the story to repair these defects. Preserve the selected calculation and its original quantities.",
+                }
+
             logger.warning(
                 "Rejected arithmetic candidate: attempt=%s/%s category=%s issues=%s",
-                attempt, self.max_attempts, type(failure).__name__,
+                attempt, 
+                self.max_attempts, 
+                type(failure).__name__,
                 "; ".join(f"{issue.code}: {issue.message}" for issue in failure.issues),
                 )
             if on_rejection is not None:
                 on_rejection(GenerationRejection(attempt, failure, problem, self.constraints, self.request_diagnostics, review))
 
         raise GenerationExhausted(failures) from failures[-1]
+
+
+def _quantity_tree(node):
+    """Describe the quantity dependencies of a checked arithmetic tree."""
+    import ast
+    if isinstance(node, ast.Constant):
+        return {"quantity": node.value}
+    return {
+        "operator": {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}[type(node.op)],
+        "left": _quantity_tree(node.left), "right": _quantity_tree(node.right),
+        }

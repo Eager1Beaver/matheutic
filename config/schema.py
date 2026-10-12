@@ -90,9 +90,11 @@ def _number(value: Any, path: str, minimum: float, *, positive: bool = False) ->
         finite = type(value) in (int, float) and isfinite(value)
     except OverflowError:
         finite = False
-    _ensure(finite
-            and (value > minimum if positive else value >= minimum),
-            f'{path} must be a finite number {">" if positive else ">="} {minimum}')
+    _ensure(
+        finite
+        and (value > minimum if positive else value >= minimum),
+        f'{path} must be a finite number {">" if positive else ">="} {minimum}'
+        )
 
 
 def _boolean(value: Any, path: str) -> None:
@@ -122,8 +124,9 @@ def validate_generator_config(g: dict, path: str = 'generator') -> None:
     _ensure(isinstance(g, dict), f'{path} must be an object')
     kind = g.get('type')
     _ensure(kind in ('single_op', 'mixed'), f'{path}.type must be single_op or mixed')
-    _object(g, path, common | ({'op'} if kind == 'single_op' else
-                             {'operators', 'operator_weights', 'operands_by_operator', 'brackets'}))
+    _object(g, path, common | ({'op'} 
+                               if kind == 'single_op' 
+                               else {'operators', 'operator_weights', 'operands_by_operator', 'brackets'}))
     _integer(g.get('n_numbers'), f'{path}.n_numbers', 2, MAX_NUMBERS)
     if kind == 'single_op':
         _ensure(g.get('op') in ('+', '-', '*', '/'), f'{path}.op must be one of + - * /')
@@ -131,8 +134,10 @@ def validate_generator_config(g: dict, path: str = 'generator') -> None:
         ops = [g['op']]
     else:
         ops = g.get('operators')
-        _ensure(isinstance(ops, list) and ops and all(op in ('+', '-', '*', '/') for op in ops),
-                f'{path}.operators must be a non-empty array of + - * /')
+        _ensure(
+            isinstance(ops, list) and ops and all(op in ('+', '-', '*', '/') for op in ops),
+            f'{path}.operators must be a non-empty array of + - * /'
+            )
         _ensure(len(set(ops)) == len(ops), f'{path}.operators must not contain duplicates')
         if 'operands' in g:
             _operand_range(g['operands'], f'{path}.operands')
@@ -152,23 +157,34 @@ def validate_generator_config(g: dict, path: str = 'generator') -> None:
             probability = brackets.get('probability', 0.35)
             _number(probability, f'{path}.brackets.probability', 0)
             _ensure(probability <= 1, f'{path}.brackets.probability must be <= 1')
-    rules = _object(g.get('rules', {}), f'{path}.rules',
-                    {'non_negative', 'non_negative_intermediate', 'require_integer_division'})
+    rules = _object(
+        g.get('rules', {}), 
+        f'{path}.rules',
+        {'non_negative', 'non_negative_intermediate', 'require_integer_division'}
+        )
     for key, value in rules.items():
         _boolean(value, f'{path}.rules.{key}')
     _ensure(rules.get('require_integer_division', True), 'only integer division is supported')
-    limits = _object(g.get('limits', {}), f'{path}.limits',
-                     {'max_operand_digits', 'max_intermediate_digits', 'max_final_digits',
-                      'max_intermediate_value', 'max_final_value'})
+    limits = _object(
+        g.get('limits', {}), 
+        f'{path}.limits',
+        {'max_operand_digits', 'max_intermediate_digits', 'max_final_digits',
+         'max_intermediate_value', 'max_final_value'},
+         )
     for key, value in limits.items():
-        _integer(value, f'{path}.limits.{key}', 1 if key.endswith('digits') else 0,
-                 144 if key.endswith('digits') else MAX_OPERAND**MAX_NUMBERS)
+        _integer(
+            value, 
+            f'{path}.limits.{key}', 
+            1 if key.endswith('digits') else 0,
+            144 if key.endswith('digits') else MAX_OPERAND**MAX_NUMBERS)
     if '/' in ops:
         lo, hi = operand_range(g, '/')
         _ensure(hi >= 1, f'{path}: division requires a positive divisor in the operand range')
         if kind == 'single_op' and lo > 0:
-            _ensure(lo ** (g['n_numbers'] - 1) <= hi,
-                    f'{path}: operand range cannot contain a dividend for this division chain')
+            _ensure(
+                lo ** (g['n_numbers'] - 1) <= hi,
+                f'{path}: operand range cannot contain a dividend for this division chain',
+                )
 
 
 def normalize_config(cfg: dict) -> dict:
@@ -192,8 +208,10 @@ def validate_config(cfg: dict[str, Any]) -> None:
     _integer(layout.get('rows_per_column'), 'layout.rows_per_column', 1, MAX_EXERCISES)
     _integer(layout.get('max_attempts_per_cell'), 'layout.max_attempts_per_cell', 1, MAX_ATTEMPTS)
     _ensure(layout.get('mode') == 'table_by_columns', 'only table_by_columns layout is supported')
-    _ensure(layout.get('overflow_policy') in ('regenerate', 'error'),
-            'overflow_policy must be regenerate or error; shrink_font is not implemented')
+    _ensure(
+        layout.get('overflow_policy') in ('regenerate', 'error'),
+        'overflow_policy must be regenerate or error; shrink_font is not implemented',
+        )
     _boolean(layout.get('show_column_headers'), 'layout.show_column_headers')
     _ensure(not layout['show_column_headers'], 'column headers are not implemented')
     _number(layout.get('cell_padding_pt'), 'layout.cell_padding_pt', 0)
@@ -209,8 +227,10 @@ def validate_config(cfg: dict[str, Any]) -> None:
             'page margins must leave usable page space')
 
     typography = _object(cfg.get('typography'), 'typography', set(DEFAULT_CONFIG['typography']))
-    _ensure(isinstance(typography.get('font_name'), str) and typography['font_name'],
-            'typography.font_name must be a non-empty string')
+    _ensure(
+        isinstance(typography.get('font_name'), str) and typography['font_name'],
+        'typography.font_name must be a non-empty string',
+        )
     _number(typography.get('font_size'), 'typography.font_size', 0, positive=True)
     _number(typography.get('line_gap'), 'typography.line_gap', 0)
 
@@ -219,21 +239,30 @@ def validate_config(cfg: dict[str, Any]) -> None:
         _boolean(answers.get(key), f'answers.{key}')
     _ensure(answers['separate_pdf'], 'inline answer keys are not implemented')
     _ensure(not answers['show_work'], 'PDF solution steps are not implemented')
-    _ensure(isinstance(answers.get('suffix'), str) and answers['suffix']
-            and not any(c in answers['suffix'] for c in ('/', '\\', '\0')),
-            'answers.suffix must be a non-empty filename suffix')
+    _ensure(
+        isinstance(answers.get('suffix'), str) and answers['suffix']
+        and not any(c in answers['suffix'] for c in ('/', '\\', '\0')),
+        'answers.suffix must be a non-empty filename suffix',
+        )
 
     _integer(len(cfg['columns']), 'column count', 1, 16)
     count = len(cfg['columns']) * layout['rows_per_column']
     _ensure(count <= MAX_EXERCISES, f'worksheet count must be <= {MAX_EXERCISES}')
-    _ensure(count * layout['max_attempts_per_cell'] <= MAX_GENERATION_BUDGET,
-            f'worksheet generation budget must be <= {MAX_GENERATION_BUDGET}')
+    _ensure(
+        count * layout['max_attempts_per_cell'] <= MAX_GENERATION_BUDGET,
+        f'worksheet generation budget must be <= {MAX_GENERATION_BUDGET}',
+        )
     gen_names = set(cfg['generators'])
     for i, col in enumerate(cfg['columns']):
         _object(col, f'columns[{i}]', {'generator'})
         name = col.get('generator')
-        _ensure(isinstance(name, str) and name and name in gen_names,
-                f'columns[{i}].generator must refer to a configured generator')
+        _ensure(
+            isinstance(name, str) and name and name in gen_names,
+            f'columns[{i}].generator must refer to a configured generator',
+            )
     for name, g in cfg['generators'].items():
-        _ensure(isinstance(name, str) and name, 'generator names must be non-empty strings')
+        _ensure(
+            isinstance(name, str) 
+            and name, 'generator names must be non-empty strings',
+            )
         validate_generator_config(g, f'generators.{name}')

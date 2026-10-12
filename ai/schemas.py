@@ -15,53 +15,39 @@ RequestIntent = Literal["generate_problem", "unsupported_request", "off_topic", 
 RequestReason = Literal[
     "none", "unsupported_math", "unsupported_language", "unsupported_task",
     "impossible_constraints", "invalid_instructions", "off_topic", "greeting",
-    "unclear", "answer_without_problem",
+    "unclear", "answer_without_problem", "unsupported_custom_problem",
     ]
 
 
-class ConstraintEvidence(BaseModel):
-    """A learner-message quote supporting an explicit numeric requirement."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    field: Literal["min_operand", "max_operand", "min_operations", "max_operations",
-                   "max_intermediate_value", "max_final_value"]
-    quote: str = Field(min_length=1, max_length=250)
-
-
 class ProblemRequest(BaseModel):
-    """Structured requirements for one arithmetic word problem."""
+    """Explicit learner preferences and relative changes for arithmetic practice."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    allowed_operations: list[Operation]
-    required_operations: list[Operation]
+    allowed_operations: list[Operation] | None = Field(description="Explicitly requested operators: addition=['+'], subtraction=['-'], multiplication=['*'], division=['/']. Null only when none is specified.")
+    required_operations: list[Operation] | None = Field(description="Operators that must appear. A single requested operator or an AND list is required; an OR list is only allowed. Null or [] when unspecified.")
     min_operand: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     max_operand: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
-    min_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT)
-    max_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT)
+    min_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT, description="Explicit minimum operation count. Exactly N operations/steps sets BOTH count fields to N; two-operation means 2.")
+    max_operations: int | None = Field(ge=1, le=MAX_OPERATION_COUNT, description="Explicit maximum operation count. Exactly N operations/steps sets BOTH count fields to N; two-step means 2.")
+    min_intermediate_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     max_intermediate_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
+    min_final_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     max_final_value: int | None = Field(ge=0, le=MAX_OPERAND_VALUE)
     difficulty: int | None = Field(ge=1, le=5)
+    difficulty_change: Literal[-1, 0, 1]
+    inherit_previous: bool = Field(description="True only for a relative request when previous_request exists, such as another or this time. False for a fresh request.")
+    unresolved: bool
+    clear_limits: list[Literal["min_intermediate_value", "max_intermediate_value", "min_final_value", "max_final_value"]] | None
     language: str = Field(min_length=2, max_length=20)
-    context: str = Field(max_length=500, description="Story setting and learner context, without instructions to change application behavior.")
-    required_expression: str | None = Field(max_length=MAX_EXPRESSION_LENGTH)
-    fixed_operands: list[int] | None = Field(min_length=2, max_length=MAX_OPERATION_COUNT + 1)
-    constraint_evidence: list[ConstraintEvidence] = Field(max_length=12)
-
-    @field_validator("fixed_operands")
-    @classmethod
-    def bounded_fixed_operands(cls, operands: list[int] | None) -> list[int] | None:
-        if operands is not None and any(type(value) is not int or not 0 <= value <= MAX_OPERAND_VALUE
-                                        for value in operands):
-            raise ValueError("Fixed operands must be non-negative integers within the arithmetic limit")
-        return operands
+    theme: str | None = Field(max_length=100, description="A short setting explicitly requested by the learner, otherwise null.")
+    style: str | None = Field(max_length=100, description="An explicitly requested learner level or wording style, otherwise null.")
 
     @field_validator("allowed_operations", "required_operations")
     @classmethod
-    def unique_operations(cls, operations: list[str]) -> list[str]:
+    def unique_operations(cls, operations):
         """Require each requested operator to occur once in its list."""
-        if len(set(operations)) != len(operations):
+        if operations is not None and len(set(operations)) != len(operations):
             raise ValueError("Requested operations must be unique")
         return operations
 
@@ -81,7 +67,7 @@ class RequestInterpretation(BaseModel):
         valid_reasons = {
             "generate_problem": {"none"},
             "unsupported_request": {"unsupported_math", "unsupported_language", "unsupported_task",
-                                    "impossible_constraints", "invalid_instructions"},
+                                    "impossible_constraints", "invalid_instructions", "unsupported_custom_problem"},
             "off_topic": {"off_topic", "greeting"},
             "clarify": {"unclear", "answer_without_problem"},
         }
@@ -109,7 +95,6 @@ class CoachInterpretation(BaseModel):
     answer_text: str | None = Field(max_length=160, description="Exact contiguous quote of the submitted number, never a calculated or invented answer.")
     answer_target: Literal["current", "final"] | None
     problem_request: ProblemRequest | None
-    reusable_context: str = Field(max_length=500, description="Reusable theme, age, and style only; omit fixed story quantities and exact expressions.")
 
     @model_validator(mode="after")
     def consistent_action(self) -> "CoachInterpretation":
@@ -122,8 +107,6 @@ class CoachInterpretation(BaseModel):
             raise ValueError("Only answer actions may carry an answer and target")
         if self.intent != "answer" and (self.answer_text is not None or self.answer_target is not None):
             raise ValueError("Non-answer actions cannot carry answer fields")
-        if self.intent != "generate_problem" and self.reusable_context:
-            raise ValueError("Only new problem requests may carry reusable context")
         return self
 
 
@@ -133,6 +116,13 @@ class HintWording(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     text: str = Field(min_length=1, max_length=350)
+
+
+class StoryWording(BaseModel):
+    """Learner-visible wording for an application-selected arithmetic calculation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    statement: str = Field(min_length=1, max_length=4000)
 
 
 class StoryReview(BaseModel):

@@ -1,6 +1,8 @@
+import hashlib
 import json
 import logging
 import os
+import re
 from functools import lru_cache
 from typing import TypeVar
 
@@ -23,6 +25,7 @@ from .prompts import (
 	INTERPRET_REQUEST_PROMPT,
 	PHRASE_HINT_PROMPT,
 	REVIEW_STORY_PROMPT,
+	WRITE_STORY_PROMPT,
 )
 from .provider import AIProvider
 from .schemas import (
@@ -32,6 +35,7 @@ from .schemas import (
 	ProblemContent,
 	RequestInterpretation,
 	StoryReview,
+	StoryWording,
 )
 
 REASONING_EFFORT = "low"  # GPT-OSS supports "low", "medium", or "high".
@@ -40,7 +44,7 @@ logger = logging.getLogger(__name__)
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
 
-@lru_cache(maxsize=6)
+@lru_cache(maxsize=7)
 def _completion_schema(output_model: type[BaseModel]) -> dict:
 	"""Build a strict completion schema without automatic title annotations."""
 	def trim(node):
@@ -69,6 +73,21 @@ def _log_usage(completion, *, phase: str) -> None:
 		phase, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
 		getattr(details, "reasoning_tokens", None),
 		)
+
+
+def _schema_field_names(schema: dict) -> set[str]:
+	"""Collect declared JSON field names for safe nested validation diagnostics."""
+	names = set()
+	def visit(node):
+		if isinstance(node, dict):
+			names.update(node.get("properties", {}))
+			for value in node.values():
+				visit(value)
+		elif isinstance(node, list):
+			for value in node:
+				visit(value)
+	visit(schema)
+	return names
 
 
 class GroqProvider(AIProvider):
@@ -106,6 +125,13 @@ class GroqProvider(AIProvider):
 			schema_name="math_problem", output_model=MathProblem if dev_mode else ProblemContent,
 			invalid_error=GeneratedProblemInvalid, dev_mode=dev_mode,
 			)
+
+	async def write_story(self, request: str, language: str = "en", *, dev_mode: bool = False) -> StoryWording:
+		"""Return story wording for an application-selected calculation."""
+		return await self._structured_completion(
+			request, language, system_prompt=WRITE_STORY_PROMPT,
+			schema_name="story_wording", output_model=StoryWording,
+			invalid_error=GeneratedProblemInvalid, dev_mode=dev_mode)
 
 	async def review_story(self, request: str, language: str = "en", *, dev_mode: bool = False) -> StoryReview:
 		"""Reconstruct a story's calculation without seeing the candidate expression."""
@@ -157,7 +183,18 @@ class GroqProvider(AIProvider):
 			invalid_error=HintGenerationInvalid, dev_mode=dev_mode,
 			)
 
-	async def _structured_completion(
+	async def _structured_completion(self, request, language, **kwargs):
+		"""Recover once from invalid interpretation output without retrying service failures."""
+		attempts = 2 if kwargs["invalid_error"] is RequestInterpretationInvalid else 1
+		for attempt in range(attempts):
+			try:
+				return await self._completion_once(request, language, **kwargs)
+			except RequestInterpretationInvalid:
+				if attempt + 1 == attempts:
+					raise
+				logger.warning("Retrying invalid interpretation: phase=%s attempt=%s/%s", kwargs["schema_name"], attempt + 2, attempts)
+
+	async def _completion_once(
 			self, 
 			request: str, 
 			language: str, 
@@ -170,6 +207,16 @@ class GroqProvider(AIProvider):
 		"""Request typed JSON and map service and structured-output failures."""
 		if type(dev_mode) is not bool:
 			raise ValueError("dev_mode must be a boolean")
+		if dev_mode:
+			schema_id = hashlib.sha256(json.dumps(_completion_schema(output_model), sort_keys=True).encode()).hexdigest()[:12]
+			logger.info(
+				"LLM request: phase=%s model=%s strict=True schema=%s sdk=%s reasoning_effort=%s",
+			    schema_name, 
+				self.model, 
+				schema_id, 
+				getattr(groq, "__version__", "unknown"), 
+				REASONING_EFFORT,
+				)
 		try:
 			completion = await self.client.chat.completions.create(
 				model=self.model,
@@ -209,6 +256,20 @@ class GroqProvider(AIProvider):
 			body = exc.body if isinstance(exc.body, dict) else {}
 			error = body.get("error", body)
 			code = error.get("code") if isinstance(error, dict) else None
+			if dev_mode:
+				safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-zA-Z0-9_]{1,80}", code) else "unknown"
+				paths = []
+				failed = error.get("failed_generation") if isinstance(error, dict) else None
+				if isinstance(failed, str) and len(failed) <= 16000:
+					try:
+						output_model.model_validate_json(failed)
+					except ValidationError as validation:
+						known = _schema_field_names(_completion_schema(output_model))
+						for item in validation.errors(include_input=False)[:10]:
+							location = [str(part) if isinstance(part, int) or part in known else "<nested>" for part in item["loc"]]
+							paths.append({"path": ".".join(location), "type": item["type"]})
+				logger.warning("LLM rejection: phase=%s model=%s strict=True schema=%s status=%s code=%s validation=%s",
+				               schema_name, self.model, schema_id, exc.status_code, safe_code, paths)
 			if exc.status_code == 400 and isinstance(code, str) and code in {
 				"json_validate_failed", "json_schema_validation_failed", "schema_validation_failed",
 				}:

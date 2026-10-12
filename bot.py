@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 MAX_GEN_ATTEMPTS = 2 # 3
 
-
+# TODO: put custom messages in a separate file, e.g. coach/messages, import from there
 def generation_fallback(error: AIProviderError) -> str:
     """Return a learner-facing explanation without provider or validation details."""
     if isinstance(error, RequestInterpretationInvalid):
@@ -43,6 +43,8 @@ def generation_fallback(error: AIProviderError) -> str:
             "for example: 'Give me an easy addition problem with numbers below 20.'"
             )
     if isinstance(error, UnsupportedProblemRequest):
+        if error.reason == "unsupported_custom_problem":
+            return "Tell me the operations, number ranges, or difficulty you want to practice, and I'll choose a problem for you. Specifying an exact calculation or fixed numbers is not supported."
         if error.reason == "unsupported_language":
             return "I can currently create problems in English. Please ask for an English problem."
         if error.reason == "impossible_constraints":
@@ -125,8 +127,9 @@ def _log_failure(error: AIProviderError) -> None:
         logger.warning("Problem generation failed: category=%s reason=%s",
                        type(error).__name__, error.reason)
     elif isinstance(error, GenerationExhausted):
-        logger.warning("Problem generation failed: category=%s attempts=%s last_failure=%s",
-                       type(error).__name__, error.attempts, type(error.last_failure).__name__)
+        logger.warning("Problem generation failed: category=%s attempts=%s last_failure=%s issues=%s",
+                       type(error).__name__, error.attempts, type(error.last_failure).__name__,
+                       ", ".join(issue.code for issue in error.last_failure.issues))
     elif isinstance(error, (GeneratedProblemInvalid, RequestInterpretationInvalid)):
         logger.warning("Problem generation failed: category=%s issues=%s", type(error).__name__,
                        "; ".join(f"{issue.code}: {issue.message}" for issue in error.issues))
@@ -138,8 +141,8 @@ def _candidate_details(problem) -> str:
     """Format a candidate's statement and mathematical metadata for development inspection."""
     return (
         f"Expression: {problem.expression}\n"
-        f"Declared answer: {getattr(problem, 'answer', 'not supplied')}\n"
-        f"Declared operations: {', '.join(getattr(problem, 'operations', ())) or 'not supplied'}\n"
+        f"Application answer: {getattr(problem, 'answer', 'not supplied')}\n"
+        f"Application operations: {', '.join(getattr(problem, 'operations', ())) or 'not supplied'}\n"
         f"Difficulty: {getattr(problem, 'difficulty', 'unspecified')}\n"
         f"Language: {getattr(problem, 'language', 'unspecified')}\n"
         f"Statement: {problem.statement[:1000]}"
@@ -200,16 +203,16 @@ def _request_details(record) -> str:
     if diagnostics is not None:
         if "interpreted" in diagnostics:
             lines.append("Interpreted requirements: " + json.dumps(diagnostics["interpreted"], ensure_ascii=False)[:950])
-        lines.append("Request corrections: " + ", ".join(diagnostics.get("corrected_fields", [])))
+        lines.append("Difficulty preset: " + str(diagnostics.get("preset", "unspecified")))
+        lines.append("Explicit preferences: " + json.dumps(diagnostics.get("explicit", {}), ensure_ascii=False)[:700])
     policy = record.constraints
     if policy is not None:
         lines.extend([
             f"Effective operand range (inclusive): {policy.min_operand}..{policy.max_operand}",
             f"Allowed operators: {', '.join(policy.allowed_operations)}; required: {', '.join(policy.required_operations) or 'none'}",
             f"Operation count: {policy.min_operations}..{policy.max_operations}",
-            f"Intermediate cap: {policy.max_intermediate_value}; final cap: {policy.max_final_value}",
-            f"Required expression: {policy.required_expression or 'none'}",
-            f"Fixed operands: {policy.fixed_operands}",
+            f"Intermediate range (before final): {policy.min_intermediate_value}..{policy.max_intermediate_value}",
+            f"Final range: {policy.min_final_value}..{policy.max_final_value}",
         ])
     review = record.story_review
     if review is None:
@@ -262,6 +265,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = deepcopy(saved)
     coach = Coach(provider, context.bot_data.get("problem_constraints"), dev_mode=dev_mode,
                   max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS))
+    coach.calculation_selector = context.bot_data.get("calculation_selector")
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
     try:
         reply = await coach.handle(

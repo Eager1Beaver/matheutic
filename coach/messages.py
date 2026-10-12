@@ -2,6 +2,7 @@
 import random
 
 # TODO: to be localized
+# TODO: include all user-facing messages in a single place - for example, here
 PRAISE = ("That's right!", "Well done!", "Correct - nice work!")
 NEXT_PROBLEM = "Would you like another problem?"
 OFFER_HINT = "Not quite. Would you like a hint? You can also try another answer."
