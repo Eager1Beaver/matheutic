@@ -96,7 +96,7 @@ class SQLiteRepository(SQLiteDatabase):
         
         counts = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(is_final), 0) FROM attempts WHERE problem_id = ?", 
-            run.problem_id,
+            (run.problem_id,),
             ).fetchone()
         hints = connection.execute(
             "SELECT COALESCE(SUM(consumes_hint), 0) FROM hints WHERE problem_id = ?", 

@@ -8,7 +8,7 @@ from importlib.resources import files
 from pathlib import Path
 from uuid import uuid4
 
-from .errors import DatabaseUnavailable, SchemaVersionError
+from .errors import DatabaseProgrammingError, DatabaseUnavailable, SchemaVersionError
 from .models import utc_now
 
 MIGRATIONS = ("001_initial.sql",)
@@ -35,6 +35,8 @@ class SQLiteDatabase:
             raise DatabaseUnavailable("The learner database is closed")
         try:
             return await asyncio.get_running_loop().run_in_executor(self._executor, function, *args)
+        except sqlite3.ProgrammingError as error:
+            raise DatabaseProgrammingError("A learner database operation was invalid") from error
         except (sqlite3.Error, OSError) as error:
             raise DatabaseUnavailable("The learner database could not be accessed") from error
 
@@ -82,7 +84,10 @@ class SQLiteDatabase:
                             statement = ""
                     if statement.strip():
                         raise SchemaVersionError("Incomplete database migration")
-                    connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (next_version, utc_now()))
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", 
+                        (next_version, utc_now()),
+                        )
                     connection.execute(f"PRAGMA user_version = {next_version}")
                     connection.execute("COMMIT")
                 except BaseException:

@@ -9,6 +9,10 @@ class DatabaseUnavailable(StorageError):
     """The database cannot currently be accessed."""
 
 
+class DatabaseProgrammingError(StorageError):
+    """A database operation violates the SQLite programming interface."""
+
+
 class SchemaVersionError(StorageError):
     """The database schema is incompatible with this application."""
 

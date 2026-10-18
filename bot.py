@@ -227,7 +227,7 @@ def _request_details(record) -> str:
         lines.append("Story review: not performed; calculations alone do not establish story agreement.")
     else:
         lines.extend([
-            "Story review (model assessment): "
+            "Story review (model assessment): "  # noqa: ISC004
             f"story={review.has_story}, question={review.has_question}, "
             f"ambiguous={review.ambiguous}, consistent={review.consistent_quantities}",
             f"Review attempts: {record.story_review_attempts}; disclosed results: {json.dumps(review.disclosed_results, ensure_ascii=False)}",
