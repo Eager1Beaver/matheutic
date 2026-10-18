@@ -1,6 +1,10 @@
 """Fixed learner-facing feedback and practice invitations."""
 import random
 
+PRACTICE_IN_OTHER_CHAT = "Your practice is active in another chat. Use /start here to begin a new session in this chat."
+PRACTICE_STORAGE_UNAVAILABLE = "I couldn't access your saved practice. Please wait a moment and try again."
+PRACTICE_RECOVERY_FAILED = "I couldn't restore your saved practice safely. Use /start to begin a new session."
+
 # TODO: to be localized
 # TODO: include all user-facing messages in a single place - for example, here
 PRAISE = ("That's right!", "Well done!", "Correct - nice work!")

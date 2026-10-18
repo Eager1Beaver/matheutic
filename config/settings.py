@@ -14,10 +14,17 @@ class ApplicationSettings:
     telegram_bot_token: str | None = field(default=None, repr=False)
     preferences: UserPreferences = field(default_factory=UserPreferences)
     dev_mode: bool = False
+    database_path: str = 'data/matheutic.sqlite3'
 
     def __post_init__(self) -> None:
         if type(self.dev_mode) is not bool:
             raise ValueError('dev_mode must be a boolean')
+        if (
+            not isinstance(self.database_path, str) 
+            or not self.database_path.strip() 
+            or self.database_path == ':memory:'
+            ):
+            raise ValueError('MATHEUTIC_DB_PATH must name a persistent SQLite file')
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> 'ApplicationSettings':
@@ -32,6 +39,7 @@ class ApplicationSettings:
             groq_api_key=env.get('GROQ_API_KEY') or None,
             telegram_bot_token=env.get('TELEGRAM_BOT_TOKEN') or None,
             dev_mode=dev_mode in ('true', '1', 'yes', 'on'),
+            database_path=env.get('MATHEUTIC_DB_PATH', 'data/matheutic.sqlite3'),
             preferences=UserPreferences(
                 interface_language=env.get('INTERFACE_LANGUAGE', 'en'),
                 content_language=env.get('CONTENT_LANGUAGE', 'en'),

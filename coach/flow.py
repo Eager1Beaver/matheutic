@@ -17,6 +17,7 @@ from config.difficulty import MAX_PROGRESSIVE_DIFFICULTY, practice_preset
 from core.constraints import ProblemConstraints
 
 from . import messages
+from .events import AttemptMade, HintShown, LearningEvent, ProblemEnded, ProblemStarted
 from .hints import plan_hint, render_hint, solution_text
 from .session import (
     AnswerAttempt,
@@ -34,6 +35,7 @@ class CoachReply:
     reaction: str | None = None
     route: RequestDecision | None = None
     generated: ValidatedProblem | None = None
+    events: tuple[LearningEvent, ...] = ()
 
 
 class Coach:
@@ -62,6 +64,7 @@ class Coach:
         intent = decision.intent
         if session.pending_difficulty is not None and intent in {"continue", "decline"}:
             return await self._pending_choice(session, "yes" if intent == "continue" else "no", on_rejection)
+        
         if intent in {"generate_problem", "repeat_problem"}:
             if (
                 decision.request is not None 
@@ -84,15 +87,18 @@ class Coach:
                     )
                 return await self._advance_choice(session, choice, on_rejection)
             return await self._generate(session, decision, on_rejection)
+        
         if intent == "answer":
             session.pending_difficulty = None
             return self._answer(session, decision)
+        
         if intent == "continue":
             if session.state == CoachState.OFFERING_HINT:
                 return await self._hint(session, intent)
             if session.state == CoachState.PROBLEM_COMPLETE:
                 return await self._generate(session, CoachDecision("repeat_problem"), on_rejection)
             return CoachReply(intent, messages.UNCLEAR if session.active else messages.NO_PROBLEM)
+        
         if intent == "decline":
             if session.state == CoachState.OFFERING_HINT:
                 session.state = CoachState.AWAITING_ANSWER
@@ -101,25 +107,33 @@ class Coach:
                 session.state = CoachState.IDLE
                 return CoachReply(intent, reaction="👍")
             return CoachReply(intent, messages.UNCLEAR if session.active else messages.ACKNOWLEDGEMENT)
+        
         if intent == "stop":
             session.pending_difficulty = None
+            events = ()
             if session.active:
                 session.run.outcome = "stopped"
+                events = (ProblemEnded(session.run.problem_id, "abandoned", "stopped"),)
             session.state = CoachState.IDLE
-            return CoachReply(intent, reaction="👍")
+            return CoachReply(intent, reaction="👍", events=events)
+        
         if intent == "give_up":
             session.pending_difficulty = None
             if not session.active:
                 return CoachReply(intent, messages.NO_PROBLEM)
             session.run.outcome = "revealed"
             session.state = CoachState.PROBLEM_COMPLETE
-            return CoachReply(intent, f"{solution_text(session.run)}\n\n{messages.NEXT_PROBLEM}")
+            return CoachReply(intent, f"{solution_text(session.run)}\n\n{messages.NEXT_PROBLEM}", events=(
+                ProblemEnded(session.run.problem_id, "revealed", "give_up"),
+                ))
+        
         if intent in {"request_hint", "repeat_hint", "explain"}:
             session.pending_difficulty = None
             if intent == "explain" and session.state == CoachState.PROBLEM_COMPLETE:
                 return CoachReply(intent, solution_text(session.run))
             return await self._hint(session, intent, question=text if intent == "explain" else "")
         route = decision.request or RequestDecision(intent, decision.reason)
+        
         if intent == "clarify" and session.active:
             return CoachReply(intent, messages.UNCLEAR)
         return CoachReply(intent, route=route)
@@ -229,7 +243,9 @@ class Coach:
     async def _generate(self, session: CoachSession, decision: CoachDecision, on_rejection) -> CoachReply:
         """Generate a replacement before changing the current problem record."""
         request = decision.request if decision.intent == "generate_problem" else session.repeat_request
+        source = "learner_repeat" if decision.intent == "repeat_problem" else "learner_request"
         if request is None:
+            source = "default"
             from ai.schemas import ProblemRequest, RequestInterpretation
             request = compile_decision(RequestInterpretation(
                 intent="generate_problem", reason="none", 
@@ -252,7 +268,7 @@ class Coach:
                 if self.calculation_selector is not None
                 else select_calculation(
                     request.constraints,
-                    preferred_operations=practice_preset(request.difficulty).preferred_operations),
+                    preferred_operations=practice_preset(request.difficulty).preferred_operations)
                     )
         except GenerationExhausted as error:
             if on_rejection is not None:
@@ -274,15 +290,27 @@ class Coach:
             calculation=plan,
             )
         result = await generator.generate(request.generation_request, request.language, on_rejection=on_rejection)
+        events: tuple[LearningEvent, ...] = ()
         if session.active:
             session.run.outcome = "replaced"
+            events = (ProblemEnded(session.run.problem_id, "abandoned", "replacement"),)
         session.run = ProblemRun(result)
         session.state = CoachState.AWAITING_ANSWER
         session.difficulty = getattr(result.problem, "difficulty", request.difficulty)
         session.language = request.language
         session.repeat_request = request
         session.pending_difficulty = None
-        return CoachReply(decision.intent, result.problem.statement, generated=result)
+        return CoachReply(
+            decision.intent, 
+            result.problem.statement, 
+            generated=result, 
+            events=events + (ProblemStarted(
+                session.run.problem_id, 
+                result, 
+                request, 
+                source,
+                ),
+            ))
 
     def _answer(self, session: CoachSession, decision: CoachDecision) -> CoachReply:
         """Grade the submitted value against the final or selected step result."""
@@ -296,15 +324,35 @@ class Coach:
         run.attempts += 1
         run.final_attempts += int(final)
         run.recent_attempts.append(AnswerAttempt(decision.value, target, correct))
+        events: tuple[LearningEvent, ...] = (AttemptMade(
+            run.problem_id, 
+            decision.value, 
+            expected, 
+            target, 
+            final, 
+            correct, 
+            run.hints_used,
+            run.validated.analysis.steps[target].operation if target is not None else None,
+            ),
+            )
         if not correct:
             session.state = CoachState.OFFERING_HINT
-            return CoachReply("answer", messages.OFFER_HINT)
+            return CoachReply("answer", messages.OFFER_HINT, events=events)
         if final:
             run.outcome = "solved"
             session.state = CoachState.PROBLEM_COMPLETE
             if target is not None:
                 run.steps_solved = target + 1
-            return CoachReply("answer", messages.completion_reply())
+            return CoachReply(
+                "answer", 
+                messages.completion_reply(), 
+                events=events + (ProblemEnded(
+                    run.problem_id, 
+                    "solved", 
+                    "guided_completion" if target is not None else "correct_answer"
+                    ), 
+                    )
+                    )
         run.steps_solved = target + 1
         run.step_index = target + 1
         run.hint_level = 0
@@ -314,7 +362,8 @@ class Coach:
         return CoachReply(
             "answer", 
             f"That's right for that step.\n\nStep {run.step_index + 1} of {len(run.validated.analysis.steps)}: "
-            f"work out {step.left} {step.operation} {step.right}. What is this step's result?"
+            f"work out {step.left} {step.operation} {step.right}. What is this step's result?",
+            events=events,
             )
 
     async def _hint(self, session: CoachSession, intent: str, *, question: str = "") -> CoachReply:
@@ -324,7 +373,18 @@ class Coach:
         run = session.run
         if intent == "repeat_hint" and run.last_hint:
             session.state = CoachState.AWAITING_ANSWER
-            return CoachReply(intent, run.last_hint)
+            return CoachReply(
+                intent, 
+                run.last_hint, 
+                events=(HintShown(
+                    run.problem_id, 
+                    "repeat", 
+                    run.hint_level, 
+                    run.step_index, 
+                    False,
+                    ),
+                    )
+                    )
         repeat = intent == "explain" and run.hint_level > 0
         plan = plan_hint(run, repeat=repeat)
         if plan is None:
@@ -336,4 +396,15 @@ class Coach:
         run.step_index = plan.step_index
         run.last_hint = text
         session.state = CoachState.AWAITING_ANSWER
-        return CoachReply(intent, text)
+        return CoachReply(
+            intent, 
+            text, 
+            events=(HintShown(
+                run.problem_id, 
+                "explanation" if intent == "explain" else "guidance",
+                plan.level, 
+                plan.step_index, 
+                not repeat,
+                ),
+                )
+                )

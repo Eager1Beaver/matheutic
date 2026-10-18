@@ -20,11 +20,15 @@ from ai.intent import RequestDecision
 from ai.orchestrator import GenerationRejection, ProblemGenerator, ValidatedProblem
 from ai.provider import AIProvider
 from coach import messages
+from coach.events import AttemptMade, HintShown, ProblemStarted
 from coach.flow import Coach
-from coach.session import InMemorySessionStore
+from coach.session import CoachSession, CoachState, InMemorySessionStore
+from config.preferences import UserPreferences
 from config.settings import ApplicationSettings
 from core.constraints import ProblemConstraints
 from core.expression import ExpressionAnalysis, ExpressionError, analyze_expression
+from storage.errors import StateRecoveryError, StorageError
+from storage.models import DeliveredTurn, TurnMetadata, timestamp, utc_now
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -245,16 +249,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
+    received_at = utc_now()
     user = getattr(update, "effective_user", None)
     first_name = user.first_name if user else "there"
+    practice = context.bot_data.get("practice_store") if context is not None else None
+    loaded = None
+    
+    if practice is not None:
+        chat_id, user_id = _session_key(update)
+        if not user_id or not chat_id:
+            return
+        loaded = await practice.load(user_id, chat_id, _update_id(update), reset=True)
+        if loaded.duplicate:
+            return
+    
     await message.reply_text(
         f"Hello, {first_name}. I'm Matheutic.\n\n"
         "Describe the kind of arithmetic problem you'd like."
         )
-    if context is not None:
+    if practice is not None:
+        await practice.commit(DeliveredTurn(
+            loaded, CoachSession(language=loaded.preferences.content_language), (),
+            TurnMetadata(_update_id(update), received_at, utc_now(), _message_time(message)), reset=True,
+            ))
+    elif context is not None:
         store = context.bot_data.setdefault("session_store", InMemorySessionStore())
         store.reset(_session_key(update))
         logger.info("Coach session reset: state=IDLE")
+
+
+def _update_id(update) -> int | None:
+    value = getattr(update, "update_id", None)
+    return value if type(value) is int else None
+
+
+def _message_time(message) -> str | None:
+    from datetime import datetime
+    value = getattr(message, "date", None)
+    return timestamp(value) if isinstance(value, datetime) and value.tzinfo is not None else None
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -262,16 +294,36 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
         return
+    received_at = utc_now()
     provider = context.bot_data["ai_provider"]
     dev_mode = context.bot_data.get("dev_mode", False)
-    store = context.bot_data.setdefault("session_store", InMemorySessionStore())
     key = _session_key(update)
-    saved = store.get(key)
+    practice = context.bot_data.get("practice_store")
+    loaded = None
+    
+    if practice is not None:
+        if not key[0] or not key[1]:
+            return
+        loaded = await practice.load(key[1], key[0], _update_id(update))
+        if loaded.duplicate:
+            return
+        if loaded.other_chat:
+            await message.reply_text(messages.PRACTICE_IN_OTHER_CHAT)
+            return
+        saved = loaded.session
+    else:
+        store = context.bot_data.setdefault("session_store", InMemorySessionStore())
+        saved = store.get(key)
     session = deepcopy(saved)
-    coach = Coach(provider, context.bot_data.get("problem_constraints"), dev_mode=dev_mode,
-                  max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS))
+    coach = Coach(
+        provider, 
+        context.bot_data.get("problem_constraints"), 
+        dev_mode=dev_mode,
+        max_attempts=context.bot_data.get("max_generation_attempts", MAX_GEN_ATTEMPTS),
+        )
     coach.calculation_selector = context.bot_data.get("calculation_selector")
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
+    
     try:
         reply = await coach.handle(
             session, message.text,
@@ -287,10 +339,18 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else generation_fallback(error)
             )
         await message.reply_text(fallback)
+        if practice is not None:
+            await practice.commit(DeliveredTurn(
+                loaded, 
+                saved, 
+                (), 
+                TurnMetadata(_update_id(update), received_at, utc_now(), _message_time(message)),
+                ))
         if rejections is not None:
             await _send_development_data(message, rejections)
         return
     text = request_reply(reply.route, active=session.active) if reply.route is not None else reply.text
+    
     if reply.reaction is not None:
         try:
             await message.set_reaction(reaction=reply.reaction)
@@ -300,10 +360,27 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(text)
     else:
         await message.reply_text(text)
+    
     if session.run is not None:
         session.run.remember("learner", message.text)
         session.run.remember("coach", text or messages.ACKNOWLEDGEMENT)
-    store.save(key, session)
+    
+    if practice is not None:
+        prompts_answer = (
+            session.active 
+            and (
+                any(isinstance(event, (ProblemStarted, AttemptMade, HintShown)) for event in reply.events)
+            or (reply.intent == "decline" and saved.state == CoachState.OFFERING_HINT)
+            ))
+        await practice.commit(DeliveredTurn(
+            loaded, 
+            session, 
+            reply.events,
+            TurnMetadata(_update_id(update), received_at, utc_now(), _message_time(message)),
+            prompt_kind=reply.intent if prompts_answer else None,
+            ))
+    else:
+        store.save(key, session)
     run = session.run
     logger.info(
         "Coach turn: intent=%s state=%s->%s attempts=%s final_attempts=%s hints_used=%s hint_level=%s step=%s outcome=%s pending_difficulty=%s",
@@ -321,11 +398,19 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
     """Report unexpected handler failures with a safe learner-facing fallback."""
     error = context.error
     logger.error("Unhandled Telegram handler failure: category=%s", type(error).__name__)
+    
     message = getattr(update, "effective_message", None)
     if message is None:
         return
-    text = (generation_fallback(error) if isinstance(error, AIProviderError) else
-            "Something went wrong while handling your request. Please try again.")
+    if isinstance(error, StateRecoveryError):
+        text = messages.PRACTICE_RECOVERY_FAILED
+    elif isinstance(error, StorageError):
+        text = messages.PRACTICE_STORAGE_UNAVAILABLE
+    else:
+        text = (
+            generation_fallback(error) 
+            if isinstance(error, AIProviderError) 
+            else "Something went wrong while handling your request. Please try again.")
     try:
         await message.reply_text(text)
     except Exception as delivery_error:
@@ -339,20 +424,40 @@ def create_application(
         *,
         dev_mode: bool = False, 
         max_generation_attempts: int = MAX_GEN_ATTEMPTS,
+        database_path: str = "data/matheutic.sqlite3",
+        preferences: UserPreferences | None = None,
         ) -> Application:
     """Build a polling application with a validation policy and optional development output."""
     generator = ProblemGenerator(
-        provider, constraints, max_attempts=max_generation_attempts, dev_mode=dev_mode,
+        provider, 
+        constraints, 
+        max_attempts=max_generation_attempts, 
+        dev_mode=dev_mode,
         )
     from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-    application = Application.builder().token(token).concurrent_updates(False).build()
+    from storage.practice import PracticeStore
+    from storage.repository import SQLiteRepository
+
+    practice = PracticeStore(SQLiteRepository(database_path, preferences=preferences))
+
+    async def open_storage(application):
+        await practice.open()
+        logger.info("Learner database ready: path=%s", practice.repository.path)
+
+    async def close_storage(application):
+        await practice.close()
+
+    application = (
+        Application.builder().token(token).concurrent_updates(False)
+        .post_init(open_storage).post_shutdown(close_storage).build()
+        )
     application.bot_data.update({
         "ai_provider": provider,
         "problem_constraints": generator.constraints,
         "max_generation_attempts": generator.max_attempts,
         "dev_mode": dev_mode,
-        "session_store": InMemorySessionStore(),
+        "practice_store": practice,
         })
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
@@ -381,10 +486,17 @@ def main() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Add it to your .env file.")
     if settings.ai_provider != "groq":
         raise RuntimeError("AI_PROVIDER must be groq.")
+    
     dev_mode = settings.dev_mode if args.dev is None else args.dev
     logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    application = create_application(settings.telegram_bot_token, GroqProvider(), dev_mode=dev_mode)
+    application = create_application(
+        settings.telegram_bot_token, 
+        GroqProvider(), 
+        dev_mode=dev_mode,
+        database_path=settings.database_path, 
+        preferences=settings.preferences,
+        )
     logger.info("Bot is running. Development mode: %s. Press Ctrl+C to stop.", dev_mode)
     application.run_polling()
 
