@@ -1,7 +1,7 @@
 """Learning events produced by a coach turn before reply delivery."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 
 from ai.intent import RequestDecision
@@ -14,6 +14,7 @@ class ProblemStarted:
     validated: ValidatedProblem
     request: RequestDecision
     source: str
+    selection_metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

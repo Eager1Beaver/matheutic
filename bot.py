@@ -265,7 +265,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     await message.reply_text(
         f"Hello, {first_name}. I'm Matheutic.\n\n"
-        "Describe the kind of arithmetic problem you'd like."
+        "Describe the kind of arithmetic problem you'd like." + _adaptive_welcome(loaded)
         )
     if practice is not None:
         await practice.commit(DeliveredTurn(
@@ -281,6 +281,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _update_id(update) -> int | None:
     value = getattr(update, "update_id", None)
     return value if type(value) is int else None
+
+
+def _adaptive_welcome(loaded) -> str:
+    if loaded is None or loaded.adaptive_state.plan is None or loaded.adaptive_state.variant == "foundation_support":
+        return ""
+    from adaptive.messages import describe
+    return "\n\nYour saved practice is " + describe(loaded.adaptive_state.plan) + ". You can request different settings anytime."
 
 
 def _message_time(message) -> str | None:
@@ -325,10 +332,17 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rejections: list[GenerationRejection] | None = [] if dev_mode else None
     
     try:
-        reply = await coach.handle(
-            session, message.text,
-            on_rejection=rejections.append if rejections is not None else None,
-            )
+        adaptive_effects = ()
+        if practice is not None:
+            from coach.application import PracticeApplication
+            prepared = await PracticeApplication(coach, practice.repository, loaded).prepare(
+                session, 
+                message.text, 
+                on_rejection=rejections.append if rejections is not None else None)
+            reply, adaptive_effects = prepared.reply, prepared.adaptive_effects
+        else:
+            reply = await coach.handle(
+                session, message.text, on_rejection=rejections.append if rejections is not None else None)
     except AIProviderError as error:
         _log_failure(error)
         logger.info("Coach turn failed: state=%s preserved", saved.state.value)
@@ -378,6 +392,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply.events,
             TurnMetadata(_update_id(update), received_at, utc_now(), _message_time(message)),
             prompt_kind=reply.intent if prompts_answer else None,
+            adaptive_effects=adaptive_effects,
             ))
     else:
         store.save(key, session)

@@ -23,7 +23,7 @@ from core.problem_validator import validate_problem
 
 from .errors import StateRecoveryError
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 
 def json_text(value) -> str:
@@ -138,6 +138,8 @@ def encode_session(session: CoachSession) -> str:
         "repeat_request": request_data(session.repeat_request),
         "difficulty": session.difficulty, 
         "language": session.language,
+        "pending_proposal_id": session.pending_proposal_id,
+        "practice_metadata": session.practice_metadata,
         "pending_difficulty": None if choice is None else {
             "request": request_data(choice.request), 
             "kind": choice.kind,
@@ -229,6 +231,8 @@ def decode_session(raw: str) -> CoachSession:
             raise ValueError("Invalid checkpoint size")
         
         value = json.loads(raw)
+        if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+            value = value | {"version": CHECKPOINT_VERSION, "pending_proposal_id": None, "practice_metadata": {}}
         _keys(value, {
             "version", 
             "state", 
@@ -237,6 +241,8 @@ def decode_session(raw: str) -> CoachSession:
             "difficulty", 
             "language", 
             "pending_difficulty",
+            "pending_proposal_id",
+            "practice_metadata",
             })
         
         if type(value["version"]) is not int or value["version"] != CHECKPOINT_VERSION:
@@ -275,7 +281,15 @@ def decode_session(raw: str) -> CoachSession:
             difficulty=difficulty,
             language=value["language"], 
             pending_difficulty=pending,
+            pending_proposal_id=value["pending_proposal_id"],
+            practice_metadata=value["practice_metadata"],
             )
+        if not isinstance(session.practice_metadata, dict):
+            raise ValueError("Invalid practice provenance")
+        if session.pending_proposal_id is not None:
+            if (not isinstance(session.pending_proposal_id, str) or not re.fullmatch(r"[0-9a-f]{32}", session.pending_proposal_id)
+                    or session.active or session.pending_difficulty is not None):
+                raise ValueError("Invalid pending practice proposal")
         if session.state in {CoachState.AWAITING_ANSWER, CoachState.OFFERING_HINT} and not session.active:
             raise ValueError("An awaiting state needs an active problem")
         if session.state == CoachState.PROBLEM_COMPLETE and (session.run is None or session.run.outcome not in {"solved", "revealed"}):

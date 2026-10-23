@@ -69,6 +69,8 @@ class CoachSession:
     difficulty: int | None = None
     language: str = "en"
     pending_difficulty: DifficultyChoice | None = None
+    pending_proposal_id: str | None = None
+    practice_metadata: dict = field(default_factory=dict)
 
     @property
     def active(self) -> bool:

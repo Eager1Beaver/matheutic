@@ -16,11 +16,12 @@ from .codec import decode_session, encode_session, exact, json_text
 from .database import SQLiteDatabase
 from .errors import SessionConflict, StateRecoveryError
 from .models import DeliveredTurn, LearnerContext, ObservationWindow, utc_now
+from .adaptive import AdaptiveRepository
 
 logger = logging.getLogger(__name__)
 
 
-class SQLiteRepository(SQLiteDatabase):
+class SQLiteRepository(AdaptiveRepository, SQLiteDatabase):
     """Persist delivered turns for one bot, retaining learner and chat identity."""
 
     def __init__(self, path, *, preferences: UserPreferences | None = None, timeout: float = 0.25) -> None:
@@ -58,6 +59,7 @@ class SQLiteRepository(SQLiteDatabase):
             except (ValueError, ZeroDivisionError) as error:
                 raise StateRecoveryError("Saved problem history failed validation") from error
         
+        adaptive_state, proposal = self._adaptive_context(connection, user_id, session)
         return LearnerContext(
             telegram_user_id, 
             chat_id, 
@@ -72,9 +74,11 @@ class SQLiteRepository(SQLiteDatabase):
             row["last_prompt_at"] if row is not None else None,
             row["prompt_process_id"] if row is not None else None,
             row["prompt_kind"] if row is not None else None,
+            adaptive_state, proposal,
             )
 
     def _check_history(self, connection, session_id: int, session: CoachSession) -> None:
+        self._check_pending(connection, session_id, session)
         active = connection.execute("SELECT id FROM problems WHERE session_id = ? AND status = 'active'", (session_id,)).fetchone()
         run = session.run
         if run is None:
@@ -199,6 +203,7 @@ class SQLiteRepository(SQLiteDatabase):
                     "UPDATE sessions SET last_prompt_at = ?, prompt_process_id = ?, prompt_kind = ? WHERE id = ?",
                     (metadata.delivered_at, self.process_id, turn.prompt_kind, session_id),
                     )
+            self._apply_adaptive(connection, user_id, session_id, turn)
             self._check_history(connection, session_id, turn.session)
             connection.execute("UPDATE sessions SET coach_state_json = ?, revision = revision + 1 WHERE id = ?", (checkpoint, session_id))
             connection.execute("COMMIT")
@@ -253,6 +258,8 @@ class SQLiteRepository(SQLiteDatabase):
             "INSERT INTO problem_operations(problem_id, operation, occurrences) VALUES (?, ?, ?)",
             [(event.problem_id, operation, count) for operation, count in Counter(analysis.operations).items()],
         )
+        connection.execute("UPDATE problems SET selection_metadata_json = ? WHERE id = ?",
+                           (json_text(event.selection_metadata), event.problem_id))
 
     def _timing(self, turn):
         context, metadata = turn.context, turn.metadata

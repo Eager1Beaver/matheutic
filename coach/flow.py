@@ -53,14 +53,15 @@ class Coach:
         self.calculation_selector = None
         self.interpreter = CoachInterpreter(provider, constraints, dev_mode=dev_mode)
         self.max_attempts = max_attempts
+        self.request_resolver = None
         self.dev_mode = dev_mode
 
-    async def handle(self, session: CoachSession, text: str, *, on_rejection=None) -> CoachReply:
+    async def handle(self, session: CoachSession, text: str, *, on_rejection=None, decision: CoachDecision | None = None) -> CoachReply:
         """Interpret a turn and update state for a reply awaiting delivery."""
         pending_reply = await self._pending_choice(session, text, on_rejection)
         if pending_reply is not None:
             return pending_reply
-        decision = await self.interpreter.interpret(text, session)
+        decision = decision or await self.interpreter.interpret(text, session)
         intent = decision.intent
         if session.pending_difficulty is not None and intent in {"continue", "decline"}:
             return await self._pending_choice(session, "yes" if intent == "continue" else "no", on_rejection)
@@ -146,12 +147,16 @@ class Coach:
                 "You've reached the largest automatic number range. You can specify custom limits or request another problem.",
                 )
         previous = session.repeat_request.preferences or {}
+        explicit_operators = session.practice_metadata.get(
+            "explicit_operations", 
+            "allowed_operations" in previous or bool(previous.get("required_operations"))
+            )
         explicit = request.diagnostics["interpreted"]
         same = None
         if (
             explicit["allowed_operations"] is None 
             and not explicit["required_operations"]
-            and ("allowed_operations" in previous or previous.get("required_operations"))
+            and explicit_operators
             ):
             same = session.repeat_request.constraints.allowed_operations
             if set(same) == set(request.constraints.allowed_operations):
@@ -261,6 +266,12 @@ class Coach:
                     )
         if request.intent != "generate_problem":
             return CoachReply(decision.intent, route=request)
+        if self.request_resolver is not None:
+            request = self.request_resolver(session, request, source)
+            if request.intent != "generate_problem":
+                return CoachReply(decision.intent, route=request)
+        selection = (request.diagnostics or {}).get("selection", {})
+        source = selection.get("source", source)
         from coach.calculations import select_calculation
         try:
             plan = (
@@ -299,6 +310,7 @@ class Coach:
         session.difficulty = getattr(result.problem, "difficulty", request.difficulty)
         session.language = request.language
         session.repeat_request = request
+        session.practice_metadata = dict(selection)
         session.pending_difficulty = None
         return CoachReply(
             decision.intent, 
@@ -309,6 +321,7 @@ class Coach:
                 result, 
                 request, 
                 source,
+                selection,
                 ),
             ))
 

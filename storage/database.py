@@ -11,7 +11,7 @@ from uuid import uuid4
 from .errors import DatabaseProgrammingError, DatabaseUnavailable, SchemaVersionError
 from .models import utc_now
 
-MIGRATIONS = ("001_initial.sql",)
+MIGRATIONS = ("001_initial.sql", "002_adaptive.sql")
 
 
 class SQLiteDatabase:

@@ -1,12 +1,13 @@
 """Application records for persisted learner turns and observations."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from coach.events import LearningEvent
 from coach.session import CoachSession
 from config.preferences import UserPreferences
+from adaptive.models import AdaptiveEffect, AdaptiveState, PracticeProposal
 
 
 def utc_now() -> str:
@@ -36,6 +37,8 @@ class LearnerContext:
     last_prompt_at: str | None = None
     prompt_process_id: str | None = None
     prompt_kind: str | None = None
+    adaptive_state: AdaptiveState = field(default_factory=AdaptiveState)
+    proposal: PracticeProposal | None = None
 
     @property
     def other_chat(self) -> bool:
@@ -59,6 +62,7 @@ class DeliveredTurn:
     metadata: TurnMetadata
     reset: bool = False
     prompt_kind: str | None = None
+    adaptive_effects: tuple[AdaptiveEffect, ...] = ()
 
 
 @dataclass(frozen=True)
