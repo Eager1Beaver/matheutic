@@ -1,166 +1,86 @@
 # Matheutic
 
-Config-driven generator for **printable math equation worksheets** — designed for **children** (skill-building) and **older adults** (maintenance/therapeutic practice).  
-The focus is simple on purpose: lots of clean, solvable equations with sensible constraints, ready to print and use.
+Matheutic is an arithmetic practice application for children and adults, with printable worksheets and a conversational Telegram Coach.
 
-> **Note:** Matheutic is an educational/practice tool. It is **not** a medical device and does not provide medical advice or treatment.
+## Telegram Coach
 
----
+Practise arithmetic through a conversation: ask for a word problem, send your answer, and get help when you need it. You can choose what to practise and change the difficulty as you go.
 
-## What it does
+### Start practising
 
-Matheutic generates sets of arithmetic equations (worksheets) such as:
+1. Open a chat with the Matheutic Coach in Telegram and press **START**, or send `/start`.
+2. Ask for a problem, such as “Give me an addition problem with numbers below 20.”
+3. Send your answer as a number or in words, such as `5`, `five`, or `I think five`.
 
-- Addition / subtraction / multiplication / division
-- Single-operation sets or mixed-operation sets
-- Options to keep results in a certain range, avoid negatives (if desired), and ensure clean integer division (if desired)
-- Optional **answer key** output
+The Coach checks your answer. If it is incorrect, you can try again or accept a hint.
 
-Everything is driven by **JSON presets** so you can generate consistent worksheets without editing code.
+Here is how to start a conversation and request a simple problem:
 
----
+<img src="assets/demo_conversation_basic.gif" 
+alt="Starting the Telegram Coach and requesting a simple problem" 
+width="300">
 
-## Features
+### Choose your practice
 
-- **Preset-based workflow**: save and reuse worksheet configurations (`presets/*.json`)
-- **Printable output**: produces clean pages suitable for classroom, home practice, or caregiver use
-- **Constraint-friendly generation**: ranges, counts, operation selection, "no negatives", integer division, etc.
-- **Reproducibility** (optional): use a seed to regenerate the exact same worksheet again
+You can ask for addition, subtraction, multiplication, division, or a combination. Choose number ranges, the number of calculation steps, an answer limit, and a difficulty from easy to hard. You can also suggest a story theme.
 
----
+For example:
 
-## Repository layout
+- “Give me an easy multiplication story with numbers from 1 to 10.”
+- “Give me a two-step addition and subtraction problem with numbers below 50.”
+- “Make it about animals, with a final answer at most 30.”
 
-```
-.
-├─ main.py                 # main generator entry point (CLI)
-├─ presets/                # ready-to-use JSON presets
-├─ sheets/                 # generated worksheets (gitignored)
-├─ requirements.txt        # Python dependencies
-└─ README.md
-```
+Practice uses whole numbers, including zero, with no negative numbers or fractions. Division always gives a whole-number result.
 
----
+### Get help along the way
 
-## Quick start
+Ask for a hint at any time. For problems with several calculation steps, the Coach guides you through one step at a time and checks your answers along the way. You can ask it to repeat or explain a hint, or show the full solution.
 
-### 1) Requirements
-- **Python 3.10+** recommended
+This conversation shows a two-step problem and the guidance through it:
 
-### 2) Install
-```bash
-git clone https://github.com/Eager1Beaver/matheutic.git
-cd matheutic
+<img src="assets/demo_conversation_steps.gif" 
+alt="Solving a two-step problem with guidance from the Telegram Coach" 
+width="300">
 
-python -m venv .venv
-# Linux/macOS:
-source .venv/bin/activate
-# Windows:
-# .venv\Scripts\activate
+### Continue and adjust
 
-pip install -r requirements.txt
-```
+Use ordinary messages to control your practice:
 
-### 3) Generate a worksheet
-```bash
-python main.py --config presets/default.json --out output/worksheet.pdf
-```
+| Message | What it does |
+| --- | --- |
+| “Another one” | Gives you a new problem with the same practice settings. |
+| “Another, but division this time” | Changes the kind of problem. |
+| “Harder” or “Easier” | Adjusts the difficulty. |
+| “Hint” | Helps with the current problem. |
+| “Repeat the hint” | Shows the latest hint again. |
+| “I give up” | Shows the solution. |
+| “Stop” | Ends the current problem. |
 
- `--help` will show all available options:
-```bash
-python main.py --help
-```
+Your practice is saved, so you can return to your current problem later. Sending `/start` begins a new session while keeping your learning history.
 
----
+As you practise, the Coach can suggest changes based on your recent answers. It explains the proposed practice, and you choose whether to accept it. You can also say “I struggle with multiplication” to ask for more focused support.
 
-## Presets
+### Find help
 
-Presets are JSON files stored in `presets/`. They define *what* to generate (operations, ranges, number of problems, layout, answers).
+Send `/help` for a short guide to requesting problems, answering, and getting hints:
 
-Example preset:
+<img src="assets/demo_help_command.gif" 
+alt="Using the Telegram Coach help command" 
+width="300">
 
-```json
-{
-  "seed": 2026,
+## Printable worksheets
 
-  "page": {
-    "size": "A4",
-    "orientation": "portrait",
-    "margin_mm": { "top": 14, "right": 12, "bottom": 14, "left": 12 }
-    },
+Matheutic also creates printable PDF worksheets with configurable arithmetic exercises, page layouts, and optional separate answer keys.
 
-  "typography": {
-    "font_name": "Times-Roman",
-    "font_size": 16,
-    "line_gap": 6
-    },
+Worksheets are currently generated using the command-line interface (CLI) and JSON presets. See [the worksheet developer guide](docs/DEV.md) for installation, preset configuration, PDF generation, and development guidance.
 
-  "layout": {
-    "mode": "table_by_columns",
-    "rows_per_column": 26,
-    "overflow_policy": "regenerate",
-    "max_attempts_per_cell": 5000,
-    "cell_padding_pt": 6
-    },
 
-  "answers": { "enabled": false },
+<!-- Adjusted attached gifs 
 
-  "generators": {
-    "mixed_4": {
-      "type": "mixed",
-      "n_numbers": 4,
-      "operators": ["+", "-", "*", "/"],
-      "operator_weights": { "+": 4, "-": 4, "*": 2, "/": 1 },
-      "operands_by_operator": {
-        "+": { "min": 10, "max": 999 },
-        "-": { "min": 10, "max": 999 },
-        "*": { "min": 2, "max": 25 },
-        "/": { "min": 2, "max": 25 }
-        },
-      "brackets": { "enabled": false },
-      "rules": {
-        "non_negative": true,
-        "non_negative_intermediate": true,
-        "require_integer_division": true
-        },
-      "limits": {
-        "max_operand_digits": 3,
-        "max_intermediate_digits": 4,
-        "max_final_digits": 4
-        }
-      }
-    },
+![Starting the Telegram Coach and requesting a simple problem](assets/demo_conversation_basic.gif)
 
-  "columns": [
-    { "generator": "mixed_4" },
-    { "generator": "mixed_4" },
-    { "generator": "mixed_4" }
-  ]
-}
-```
+![Solving a two-step problem with guidance from the Telegram Coach](assets/demo_conversation_steps.gif)
 
----
+![Using the Telegram Coach help command](assets/demo_help_command.gif)
 
-## Design goals
-
-- **Low friction**: one command → a ready-to-print worksheet
-- **Clarity over cleverness**: clean arithmetic, obvious formatting, minimal distractions
-- **Human-friendly**: works for kids, adults, and seniors; suitable for caregivers/teachers
-
----
-
-## Roadmap
-
-Matheutic is under development - more features ahead!
-
----
-
-## License
-
-See the `LICENSE` file in this repository.
-
----
-
-## Acknowledgements
-
-Built with the simple idea that a little daily arithmetic can be a gentle, effective mental workout.
+-->

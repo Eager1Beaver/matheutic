@@ -1,6 +1,6 @@
 [project]
 name = "matheutic"
-version = "0.1.0"
+version = "0.3.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -24,15 +24,20 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "bot"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["tests", "tests.*", "docs", "docs.*"]
+exclude = ["tests", "tests.*", "docs", "docs.*", "historical", "historical.*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+storage = ["migrations/*.sql"]
 
 [project.scripts]
 matheutic = "main:main"
+matheutic-coach = "bot:main"
+matheutic-seed-history = "scripts.seed_learner_histories:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
