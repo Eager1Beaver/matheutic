@@ -266,6 +266,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(
         f"Hello, {first_name}. I'm Matheutic.\n\n"
         "Describe the kind of arithmetic problem you'd like." + _adaptive_welcome(loaded)
+        + "\n\nOpen Menu and choose Help for a quick guide."
         )
     if practice is not None:
         await practice.commit(DeliveredTurn(
@@ -276,6 +277,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         store = context.bot_data.setdefault("session_store", InMemorySessionStore())
         store.reset(_session_key(update))
         logger.info("Coach session reset: state=IDLE")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a quick guide to arithmetic practice."""
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(messages.HELP)
+
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Accept the language menu command."""
+    pass
 
 
 def _update_id(update) -> int | None:
@@ -449,6 +462,7 @@ def create_application(
         max_attempts=max_generation_attempts, 
         dev_mode=dev_mode,
         )
+    from telegram import BotCommand, MenuButtonCommands
     from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
     from storage.practice import PracticeStore
@@ -456,16 +470,21 @@ def create_application(
 
     practice = PracticeStore(SQLiteRepository(database_path, preferences=preferences))
 
-    async def open_storage(application):
+    async def initialize_bot(application):
         await practice.open()
         logger.info("Learner database ready: path=%s", practice.repository.path)
+        await application.bot.set_my_commands([
+            BotCommand("help", "Help"),
+            BotCommand("language", "Language"),
+            ])
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     async def close_storage(application):
         await practice.close()
 
     application = (
         Application.builder().token(token).concurrent_updates(False)
-        .post_init(open_storage).post_shutdown(close_storage).build()
+        .post_init(initialize_bot).post_shutdown(close_storage).build()
         )
     application.bot_data.update({
         "ai_provider": provider,
@@ -475,6 +494,8 @@ def create_application(
         "practice_store": practice,
         })
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("language", language_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
     application.add_error_handler(handle_error)
     return application
