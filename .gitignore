@@ -1,5 +1,7 @@
 /matheutic
 /temp
 /sheets
-/tests
+/tests/
 matheutic.code-workspace
+/work_plan.md
+/__init__.py
